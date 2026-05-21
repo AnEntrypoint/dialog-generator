@@ -3,7 +3,14 @@ import fs from 'fs'
 import path from 'path'
 
 const SAMPLE_RATE = 24000
-const MAX_CHUNK_CHARS = 200
+// Smaller chunks → faster first audio out of TTS. Each chunk runs an
+// independent generate(); 80-100 chars is roughly one clause and gives
+// the user audio while later clauses are still synthesizing.
+const MAX_CHUNK_CHARS = Number(process.env.TTS_CHUNK_CHARS || 90)
+// Cap autoregressive audio token decode. Chatterbox emits ~50 audio tokens
+// per char of input, so 90 chars × 1.5 = ~140 tokens. 192 is a generous cap
+// that still avoids the long tail of 256.
+const TTS_MAX_NEW_TOKENS = Number(process.env.TTS_MAX_NEW_TOKENS || 192)
 const TENSOR_KEYS = ['audio_features', 'audio_tokens', 'speaker_embeddings', 'speaker_features']
 const TYPED_ARRAYS = { float32: Float32Array, int64: BigInt64Array }
 
@@ -31,12 +38,24 @@ function splitTextIntoChunks(text) {
   const trimmed = text.trim()
   if (!trimmed) return []
   if (trimmed.length <= MAX_CHUNK_CHARS) return [trimmed]
+  // Split on sentence boundaries first, then on commas if a single sentence
+  // is too long — gets the first clause synthesized & playing earlier.
   const sentences = splitSentences(trimmed)
+  const pieces = []
+  for (const s of sentences) {
+    if (s.length <= MAX_CHUNK_CHARS) { pieces.push(s); continue }
+    let buf = ''
+    for (const part of s.split(/(?<=,)\s+/)) {
+      if (buf && (buf + ' ' + part).length > MAX_CHUNK_CHARS) { pieces.push(buf); buf = part }
+      else buf = buf ? buf + ' ' + part : part
+    }
+    if (buf) pieces.push(buf)
+  }
   const chunks = []
   let cur = ''
-  for (const s of sentences) {
-    if (cur && (cur + ' ' + s).length > MAX_CHUNK_CHARS) { chunks.push(cur); cur = s }
-    else cur = cur ? cur + ' ' + s : s
+  for (const p of pieces) {
+    if (cur && (cur + ' ' + p).length > MAX_CHUNK_CHARS) { chunks.push(cur); cur = p }
+    else cur = cur ? cur + ' ' + p : p
   }
   if (cur) chunks.push(cur)
   return chunks
@@ -175,7 +194,7 @@ export async function setRefVoice(wavPath) {
 async function generateChunk(text, signal) {
   if (signal?.aborted) return null
   const inputs = await processor._call(text)
-  const waveform = await model.generate({ ...inputs, ...speakerEmbeddings, exaggeration: 0.5, max_new_tokens: 256 })
+  const waveform = await model.generate({ ...inputs, ...speakerEmbeddings, exaggeration: 0.5, max_new_tokens: TTS_MAX_NEW_TOKENS })
   if (signal?.aborted) return null
   return new Float32Array(waveform.data.buffer.slice(waveform.data.byteOffset, waveform.data.byteOffset + waveform.data.byteLength))
 }

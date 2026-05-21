@@ -106,16 +106,26 @@ async function runStage(stage) {
   }
 }
 
+const STALE_USER_TURN_MS = Number(process.env.GATE_STALE_USER_TURN_MS || 20000)
+
 const stageHandlers = {
   GATING: async (abort) => {
     if (!(await isLLMAvailable())) { setState('LISTENING', 'LLM offline'); return }
+
+    const last = state.history[state.history.length - 1]
+    if (!last || last.role !== 'user') { setState('LISTENING', 'no user turn'); return }
+    const ageMs = Date.now() - last.timestamp
+    if (ageMs > STALE_USER_TURN_MS) {
+      console.log(`[gate] last user turn is stale (${ageMs}ms) — skipping`)
+      setState('LISTENING', 'stale-user-turn')
+      return
+    }
 
     // Fast-path: skip the LLM gate call for clearly substantive messages.
     // The gate prompt itself says "YES by default" — a separate ~1s round-trip
     // per turn just to confirm that is wasteful. Only ask the LLM when the
     // message is short enough to be plausibly a filler ("yeah", "hm", "ok").
-    const last = state.history[state.history.length - 1]
-    const lastUserText = (last && last.role === 'user' ? last.text : '').trim()
+    const lastUserText = (last.text || '').trim()
     if (lastUserText.length >= GATE_LLM_THRESHOLD_CHARS) {
       const t = Date.now() - state.enteredAt
       state.lastDecision = { decision: 'YES', at: Date.now(), source: 'fastpath', latencyMs: t }
@@ -209,8 +219,10 @@ export function noteWhisperWord({ userId, username, text }) {
   state.lastWhisperAt = Date.now()
   state.activeSpeakers.set(userId, { username, lastWordAt: state.lastWhisperAt, lastText: text })
   const last = state.history[state.history.length - 1]
-  if (last && last.role === 'user' && last.username === username) last.text = text
-  else snapHistory('user', text, username)
+  if (last && last.role === 'user' && last.username === username) {
+    last.text = text
+    last.timestamp = state.lastWhisperAt
+  } else snapHistory('user', text, username)
   transitions[state.name]?.onWhisperWord?.()
 }
 

@@ -2,9 +2,15 @@ import { transcribe } from './discord-whisper.js'
 
 const SAMPLE_RATE = 48000
 const DEBOUNCE_MS = 200
-const MIN_RETRANSCRIBE_SAMPLES = SAMPLE_RATE * 0.2
-const STABILITY_MS = 350
-const MIN_WORDS_TO_FIRE = 1
+// Require at least ~1s of audio before the first transcription pass —
+// transcribing tiny fragments (~200ms) leads to misrecognition like "you"
+// instead of the full sentence the user said. The user can still talk for
+// longer; subsequent re-transcriptions extend the window.
+const MIN_RETRANSCRIBE_SAMPLES = SAMPLE_RATE * Number(process.env.WHISPER_MIN_SECONDS || 0.9)
+// How long the transcript must stay unchanged before we fire it as "stable".
+// Higher = more user-pause-tolerant, fewer mid-sentence false fires.
+const STABILITY_MS = Number(process.env.WHISPER_STABILITY_MS || 600)
+const MIN_WORDS_TO_FIRE = Number(process.env.WHISPER_MIN_WORDS || 2)
 
 const sessions = new Map()
 
