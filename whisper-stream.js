@@ -124,7 +124,9 @@ async function maybeRetranscribe(userId) {
     if (!isSentinel(text) && wordCount(text) >= MIN_WORDS_TO_FIRE) {
       scheduleStabilityCheck(userId)
     }
-    for (const fn of s.listeners) try { fn(text, result.confidence, prev) } catch {}
+    if (text && text !== prev) {
+      for (const fn of s.listeners) try { fn(text, result.confidence, prev) } catch {}
+    }
   } catch (err) {
     console.error(`[stream] uid=${userId} transcribe error:`, err.message)
   } finally {

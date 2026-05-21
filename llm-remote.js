@@ -123,7 +123,7 @@ export async function generate(prompt, system = 'You are a helpful assistant. Be
     return out
   } catch (err) {
     if (signal?.aborted || err?.name === 'AbortError') {
-      const e = err instanceof Error ? err : new Error('aborted')
+      const e = new Error('aborted')
       e.name = 'AbortError'
       throw e
     }

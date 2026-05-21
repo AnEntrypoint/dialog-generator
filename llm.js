@@ -44,7 +44,7 @@ async function withFallback(fn) {
   try {
     return await fn(backend)
   } catch (err) {
-    if (err?.name === 'AbortError') throw err
+    if (err?.name === 'AbortError' || err?.message?.includes('aborted')) throw err
     if (isRemote(backend) && !FORCE_REMOTE) {
       console.warn(`[llm] remote call failed (${err?.message || err}); switching to local`)
       remote.resetAvailability()
@@ -60,9 +60,14 @@ async function withFallback(fn) {
 export async function isAvailable() {
   try {
     const b = await pickBackend()
-    if (typeof b.isAvailable === 'function') return await b.isAvailable()
+    if (typeof b.isAvailable === 'function') {
+      const ok = await b.isAvailable()
+      if (!ok) console.warn('[llm] backend isAvailable returned false')
+      return ok
+    }
     return true
-  } catch {
+  } catch (err) {
+    console.warn('[llm] isAvailable threw:', err?.message)
     return false
   }
 }

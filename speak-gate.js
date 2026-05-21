@@ -38,6 +38,7 @@ const state = {
 function setState(next, reason = '') {
   console.log(`[gate] ${state.name} → ${next}${reason ? ` (${reason})` : ''}`)
   state.name = next; state.enteredAt = Date.now()
+  if (next !== 'SPEAKING') state._chunksPlayed = 0
 }
 
 function abortCurrent(reason) {
@@ -66,12 +67,20 @@ function armDebounce() {
 
 const onWhisperAbort = (reason) => () => { abortCurrent(reason); setState('WAITING', 'aborted by whisper'); armDebounce() }
 
+// Protect SPEAKING until the bot has actually produced audio (TTS first chunk
+// can take >1s), capped at SPEAKING_PROTECT_MAX_MS so a stuck TTS still yields.
+const SPEAKING_PROTECT_MAX_MS = Number(process.env.GATE_SPEAKING_PROTECT_MAX_MS || 3000)
+const onSpeakingWhisper = () => {
+  if (!state._chunksPlayed && Date.now() - state.enteredAt < SPEAKING_PROTECT_MAX_MS) return
+  onWhisperAbort('whisper-mid-speak')()
+}
+
 const transitions = {
   LISTENING: { onWhisperWord: () => { setState('WAITING', 'first whisper word'); armDebounce() } },
   WAITING:   { onWhisperWord: () => armDebounce() },
   GATING:    { onWhisperWord: onWhisperAbort('whisper-mid-gate') },
   ANSWERING: { onWhisperWord: onWhisperAbort('whisper-mid-answer') },
-  SPEAKING:  { onWhisperWord: onWhisperAbort('whisper-mid-speak') },
+  SPEAKING:  { onWhisperWord: onSpeakingWhisper },
 }
 
 async function runStage(stage) {
@@ -110,7 +119,7 @@ const stageHandlers = {
     const multiHint = recent.length >= 2
       ? `\n\nMultiple people just spoke at the same time: ${recent.map(s => s.username).join(' and ')}. Address both in your one reply.`
       : ''
-    const raw = await generateLLM(`${buildContext()}${multiHint}\n\nReply with the bot's next spoken turn. Keep it conversational and short.`, state.characterPrompt || undefined, abort.signal)
+    const raw = await generateLLM(`${buildContext()}${multiHint}\n\nReply with the bot's next spoken turn. Keep it conversational and short.`, state.characterPrompt || undefined, abort.signal, { maxTokens: 80 })
     if (state.abort !== abort) return
     const text = (raw || '').trim().slice(0, MAX_RESPONSE_CHARS)
     if (!text) { setState('LISTENING', 'empty answer'); return }
@@ -122,10 +131,12 @@ const stageHandlers = {
     state._pendingResponse = null
     if (!text) { setState('LISTENING', 'no text'); return }
     let chunksPlayed = 0
+    state._chunksPlayed = 0
     const onChunk = (audio, sr) => {
       if (abort.signal.aborted || !state.audioSink) return
       state.audioSink(resampleAudio(audio, sr || SAMPLE_RATE_TTS_FALLBACK, SAMPLE_RATE_DISCORD), text)
       chunksPlayed++
+      state._chunksPlayed = chunksPlayed
     }
     try {
       await synthesizeStream(text, state.refPath, state.refText, onChunk, abort.signal)

@@ -122,7 +122,7 @@ async function connectToVoiceChannel(guildId, channelId) {
       const code = typeof evt === 'object' ? (evt.code ?? evt) : evt
       lastVoiceCloseCode.value = code
       lastVoiceCloseCode.reason = typeof evt === 'object' ? evt.reason?.toString?.() : null
-      if (code !== 4006) return
+      if (code !== 4006 && code !== 4014) return
       const now = Date.now()
       if (now - _wsCloseWindowStart > 30000) { _wsCloseCount = 0; _wsCloseWindowStart = now }
       _wsCloseCount++
