@@ -17,8 +17,21 @@ let _lastError = null
 let _botSpeakingUntil = 0
 let _usernameResolver = (uid) => `user${String(uid).slice(-4)}`
 const _skippedFrames = new Map()
-const _audioOut = { sinkInvocations: 0, totalSamples: 0, lastInvokeAt: 0, lastError: null }
+const _audioOut = {
+  sinkInvocations: 0, totalSamples: 0, lastInvokeAt: 0, lastError: null,
+  droppedNotReady: 0, droppedInvalidShape: 0, lastDropReason: null,
+}
 export function getAudioOutStats() { return { ..._audioOut } }
+
+let _voiceConnectionGetter = null
+export function setVoiceConnectionGetter(fn) { _voiceConnectionGetter = fn }
+function isVoiceReady() {
+  if (!_voiceConnectionGetter) return true // legacy path: assume ready
+  try {
+    const conn = _voiceConnectionGetter()
+    return conn?.state?.status === 'ready'
+  } catch { return false }
+}
 
 export function setUsernameResolver(fn) { _usernameResolver = fn }
 
@@ -27,8 +40,25 @@ export function init(processingQueue, lastErrorRef) {
   _lastError = lastErrorRef
   speakGate.setAudioSink((monoChunk, _text) => {
     try {
+      if (!(monoChunk instanceof Float32Array) || monoChunk.length === 0) {
+        _audioOut.droppedInvalidShape++
+        _audioOut.lastDropReason = `invalid-shape len=${monoChunk?.length}`
+        return
+      }
+      if (!isVoiceReady()) {
+        _audioOut.droppedNotReady++
+        _audioOut.lastDropReason = 'voice-not-ready'
+        if (_audioOut.droppedNotReady <= 3 || _audioOut.droppedNotReady % 50 === 0) {
+          console.warn(`[vad] dropping audio frame: voice connection not ready (total dropped=${_audioOut.droppedNotReady})`)
+        }
+        return
+      }
       const stereo = new Float32Array(monoChunk.length * 2)
-      for (let i = 0; i < monoChunk.length; i++) { stereo[i * 2] = monoChunk[i]; stereo[i * 2 + 1] = monoChunk[i] }
+      for (let i = 0; i < monoChunk.length; i++) {
+        const v = monoChunk[i]
+        const c = v > 1 ? 1 : v < -1 ? -1 : v
+        stereo[i * 2] = c; stereo[i * 2 + 1] = c
+      }
       const durMs = (monoChunk.length / SAMPLE_RATE) * 1000
       const base = Math.max(_botSpeakingUntil, Date.now())
       _botSpeakingUntil = base + durMs + BOT_SPEAK_TAIL_MS

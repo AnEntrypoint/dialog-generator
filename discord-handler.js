@@ -3,16 +3,19 @@ import { createClient, joinDiscordVoice, subscribeToSpeaker, leaveVoice } from '
 import { initVoicePlayer } from 'dispipe/voice'
 
 const lastVoiceCloseCode = { value: null, reason: null }
-import { onPcmChunk, init as initVad, getBuffers, setUsernameResolver, getAudioOutStats } from './discord-vad.js'
+import { onPcmChunk, init as initVad, getBuffers, setUsernameResolver, getAudioOutStats, setVoiceConnectionGetter } from './discord-vad.js'
 
 let discordClient = null
 let isConnected = false
 let currentChannelState = { guildId: null, channelId: null }
+let _activeVoiceConnection = null
+function getActiveVoiceConnection() { return _activeVoiceConnection }
 const lastError = { value: null }
 let messageCount = 0
 const processingQueue = []
 let _onCommand = null
 
+setVoiceConnectionGetter(() => _activeVoiceConnection)
 initVad(processingQueue, lastError)
 
 async function initDiscordBot(onUserAudio, onCommand, onReady) {
@@ -108,6 +111,7 @@ async function connectToVoiceChannel(guildId, channelId) {
     }
   }
   currentChannelState = { guildId, channelId }
+  _activeVoiceConnection = voiceConnection
   voiceConnection.on('error', (err) => {
     console.error('[discord] voice connection error:', err?.message || err)
     lastError.value = { message: `voice: ${err?.message || err}`, timestamp: Date.now() }
@@ -196,6 +200,7 @@ function disconnectFromVoiceChannel() {
   leaveVoice()
   getBuffers().clear()
   currentChannelState = { guildId: null, channelId: null }
+  _activeVoiceConnection = null
   console.log('[discord] Disconnected from voice channel')
 }
 
@@ -237,4 +242,5 @@ export {
   handleJoinCommand,
   getDebugState,
   getDiscordClient,
+  getActiveVoiceConnection,
 }
