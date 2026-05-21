@@ -29,6 +29,24 @@ Both server and browser use **Bonsai** (1-bit quantized, onnx-community) for max
 - Server: 128ms warm generation (token output after init), 2.3s `getLlama()` startup
 - Browser: WebGPU-capable device: similar; fallback CPU: ~5–30s per inference
 
+## Server LLM Dispatcher — Remote-first, Lazy Local Fallback
+
+`llm.js` is the server-side dispatch facade. It prefers the **chatjimmy.ai** free public endpoint (via `llm-remote.js`); on failure it lazy-imports `llm-llamacpp.js` so processes that succeed remotely never pay node-llama-cpp's GPU init cost.
+
+**Call sites** (all import from `./llm.js`, never the backend modules directly): `speak-gate.js`, `server.js`.
+
+**Backend selection** is cached after first probe. On a remote-call exception (not abort), the dispatcher resets availability, loads local, and retries once. `LLM_FORCE_LOCAL=1` or `LLM_FORCE_REMOTE=1` pin one side.
+
+### Remote backend — `llm-remote.js` (chatjimmy.ai)
+
+`POST https://chatjimmy.ai/api/chat` body `{messages, chatOptions:{selectedModel}}`. Anonymous, no auth. Only model available: `llama3.1-8B`. Streaming response is plain chunked text (NOT SSE) terminated by a `<|stats|>{...}<|/stats|>` envelope which the parser strips. TTFB from Windows ~1.2–1.5s.
+
+**Grammar limitation**: remote has no constraint support. `buildGrammar('root ::= "YES" | "NO"')` returns an opaque token; `generate()` post-processes the response to extract the first matching alternation literal (case-insensitive). Sufficient for the YES/NO gating used by `speak-gate.js`.
+
+**Quirk**: unknown `selectedModel` is silently coerced to `llama3.1-8B` (200 OK). Watch for config bugs being masked.
+
+**Env**: `CJ_BASE`, `CJ_MODEL`, `CJ_PROBE_TIMEOUT_MS`, `CJ_REQUEST_TIMEOUT_MS`.
+
 ## Browser Demo LLM — Bonsai-WebGPU
 
 The browser demo now uses **Bonsai-1.7B-ONNX** (1-bit quantized) via the **bonsai-webgpu Space** inference engine.

@@ -5,7 +5,7 @@ import { fileURLToPath } from 'url'
 import { encodeWAV, buildAfan } from './server-utils.mjs'
 import { LipsyncSDKNode } from '../a2f/lipsync-sdk-node.mjs'
 import { synthesize as synthesizeTTS, setRefVoice as chatterboxSetRef } from './chatterbox-tts-bridge.js'
-import { generate as generateLLM, isAvailable as isLLMAvailable } from './llm-llamacpp.js'
+import { generate as generateLLM, isAvailable as isLLMAvailable } from './llm.js'
 
 // Load environment variables from .env
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -308,7 +308,7 @@ async function start() {
       }
 
       try {
-        const llm = await import('./llm-llamacpp.js')
+        const llm = await import('./llm.js')
         llm.warmup(getCharacterSystemPrompt() || undefined).catch(err => console.warn('[server] llm warmup:', err.message))
       } catch (err) {
         console.warn('[server] llm warmup import failed:', err.message)

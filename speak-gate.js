@@ -1,4 +1,4 @@
-import { generate as generateLLM, isAvailable as isLLMAvailable, buildGrammar } from './llm-llamacpp.js'
+import { generate as generateLLM, isAvailable as isLLMAvailable, buildGrammar } from './llm.js'
 import { synthesizeStream, setRefVoice as _setRefVoice } from './chatterbox-tts-bridge.js'
 import { resampleAudio } from './server-utils.mjs'
 
