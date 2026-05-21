@@ -7,8 +7,51 @@ import { LipsyncSDKNode } from '../a2f/lipsync-sdk-node.mjs'
 import { synthesize as synthesizeTTS, setRefVoice as chatterboxSetRef } from './chatterbox-tts-bridge.js'
 import { generate as generateLLM, isAvailable as isLLMAvailable } from './llm.js'
 
-// Load environment variables from .env
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
+
+// Singleton guard. Running two diagen servers at once causes a Discord WS 4006
+// storm because both instances connect the same bot token to voice, and
+// Discord invalidates each side's session repeatedly. Two-layered protection:
+//   1. Lockfile with pid (cheap, but only sees other guarded processes)
+//   2. Port probe on 8080 (catches unguarded processes / stale-but-bound ports)
+import net from 'net'
+const LOCKFILE = path.join(__dirname, '.server.pid')
+const PORT = Number(process.env.PORT || 8080)
+
+function isPidAlive(pid) {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+function portInUse(port) {
+  return new Promise((resolve) => {
+    const srv = net.createServer()
+    srv.once('error', (err) => { resolve(err.code === 'EADDRINUSE') })
+    srv.once('listening', () => { srv.close(() => resolve(false)) })
+    srv.listen(port, '127.0.0.1')
+  })
+}
+async function acquireSingletonLock() {
+  if (process.env.DIAGEN_ALLOW_MULTIPLE === '1') return
+  if (await portInUse(PORT)) {
+    console.error(`[server] Port ${PORT} is already in use — another diagen instance is likely running.`)
+    console.error('[server] Stop it first, or set PORT=... or DIAGEN_ALLOW_MULTIPLE=1.')
+    process.exit(2)
+  }
+  if (fs.existsSync(LOCKFILE)) {
+    const otherPid = Number(fs.readFileSync(LOCKFILE, 'utf8').trim())
+    if (otherPid && otherPid !== process.pid && isPidAlive(otherPid)) {
+      console.error(`[server] Lockfile claims pid=${otherPid} is running.`)
+      console.error('[server] Stop it first, or set DIAGEN_ALLOW_MULTIPLE=1 to bypass (will cause WS 4006 storm).')
+      process.exit(2)
+    }
+    console.warn(`[server] Removing stale lockfile (pid=${otherPid} no longer alive)`)
+  }
+  fs.writeFileSync(LOCKFILE, String(process.pid))
+  const release = () => { try { if (fs.readFileSync(LOCKFILE, 'utf8').trim() === String(process.pid)) fs.unlinkSync(LOCKFILE) } catch {} }
+  process.on('exit', release)
+  process.on('SIGINT', () => { release(); process.exit(0) })
+  process.on('SIGTERM', () => { release(); process.exit(0) })
+}
+await acquireSingletonLock()
 const envPath = path.join(__dirname, '.env')
 if (fs.existsSync(envPath)) {
   const envContent = fs.readFileSync(envPath, 'utf8')

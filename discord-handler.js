@@ -91,6 +91,15 @@ async function forceClearBotVoiceState(guildId) {
 }
 
 let _reconnectInFlight = false
+// Exponential backoff for storm-triggered reconnects. If 4006/4014 keeps
+// firing across multiple reconnect cycles, the issue is external (another
+// bot instance, Discord-side ghost session) and aggressive retry just makes
+// it worse. Cool off progressively, then circuit-break.
+let _stormGenerations = 0       // how many full reconnects we've fired
+let _stormWindowStart = Date.now()
+const STORM_BACKOFFS_MS = [2000, 8000, 30000, 120000] // 2s, 8s, 30s, 2m
+const STORM_MAX_GENERATIONS = STORM_BACKOFFS_MS.length
+
 async function connectToVoiceChannel(guildId, channelId) {
   if (!discordClient) throw new Error('Discord bot not initialized')
   if (!isConnected) throw new Error('Discord bot not ready')
@@ -110,6 +119,11 @@ async function connectToVoiceChannel(guildId, channelId) {
       await new Promise(r => setTimeout(r, wait))
     }
   }
+  // Reset storm generation tracker on a successful join that survives 10
+  // minutes — anything shorter than that and we keep escalating the backoff.
+  setTimeout(() => {
+    if (Date.now() - _stormWindowStart > 600000) { _stormGenerations = 0; _stormWindowStart = Date.now() }
+  }, 600000).unref?.()
   currentChannelState = { guildId, channelId }
   _activeVoiceConnection = voiceConnection
   voiceConnection.on('error', (err) => {
@@ -132,10 +146,19 @@ async function connectToVoiceChannel(guildId, channelId) {
       _wsCloseCount++
       if (_wsCloseCount < 3 || _reconnectInFlight) return
       _reconnectInFlight = true
-      console.log(`[discord] WS 4006 storm detected (${_wsCloseCount} closes) — forcing full reconnect with REST clear`)
+      if (_stormGenerations >= STORM_MAX_GENERATIONS) {
+        console.error(`[discord] WS ${code} storm persists after ${_stormGenerations} reconnects — circuit-breaking. Likely cause: another diagen instance holds this bot's voice session. Investigate and restart.`)
+        lastError.value = { message: `voice: storm circuit-broken (code=${code})`, timestamp: Date.now() }
+        _reconnectInFlight = false
+        return
+      }
+      const wait = STORM_BACKOFFS_MS[_stormGenerations] ?? STORM_BACKOFFS_MS[STORM_BACKOFFS_MS.length - 1]
+      _stormGenerations++
+      _stormWindowStart = Date.now()
+      console.log(`[discord] WS ${code} storm gen=${_stormGenerations}/${STORM_MAX_GENERATIONS} (${_wsCloseCount} closes) — cooling off ${wait}ms before reconnect`)
       try { voiceConnection.destroy() } catch {}
       try {
-        await new Promise(r => setTimeout(r, 2000))
+        await new Promise(r => setTimeout(r, wait))
         await connectToVoiceChannel(guildId, channelId)
       } catch (err) {
         console.error('[discord] forced reconnect failed:', err.message)
