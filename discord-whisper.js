@@ -69,49 +69,78 @@ export function getWhisperInfo() {
   return { model: WHISPER_MODEL, dtype: WHISPER_DTYPE, device: pipelineActualDevice, loaded: Boolean(whisperPipeline) }
 }
 
-export async function transcribe(pcmBuffer, sampleRate = 48000) {
-  if (!pcmBuffer || typeof pcmBuffer !== 'object') throw new Error('transcribe: pcmBuffer must be a Buffer or Uint8Array')
-  if (typeof sampleRate !== 'number' || sampleRate < 8000 || sampleRate > 48000) throw new Error(`transcribe: sampleRate must be between 8000-48000, got ${sampleRate}`)
+export async function transcribe(pcm, sampleRate = 48000) {
+  if (!pcm) throw new Error('transcribe: pcm input required')
+  if (typeof sampleRate !== 'number' || sampleRate < 8000 || sampleRate > 48000) {
+    throw new Error(`transcribe: sampleRate must be between 8000-48000, got ${sampleRate}`)
+  }
 
   const asr = await initPipeline()
 
-  const pcmArray = new Int16Array(
-    pcmBuffer.buffer || pcmBuffer,
-    pcmBuffer.byteOffset || 0,
-    pcmBuffer.byteLength ? pcmBuffer.byteLength / 2 : pcmBuffer.length
-  )
+  // Accept either Float32Array (preferred — no precision loss) or Int16
+  // PCM in a Buffer / Uint8Array (back-compat for old callers).
+  let audioData
+  if (pcm instanceof Float32Array) {
+    audioData = pcm
+  } else {
+    const i16 = new Int16Array(
+      pcm.buffer || pcm,
+      pcm.byteOffset || 0,
+      pcm.byteLength ? pcm.byteLength / 2 : pcm.length
+    )
+    audioData = new Float32Array(i16.length)
+    for (let i = 0; i < i16.length; i++) audioData[i] = i16[i] / 32768.0
+  }
 
-  const audioData = new Float32Array(pcmArray.length)
-  for (let i = 0; i < pcmArray.length; i++) audioData[i] = pcmArray[i] / 32768.0
-
+  // Resample to Whisper's native 16kHz with a tiny low-pass via 4-tap
+  // averaging — better than a single linear interp for anti-alias on the 3×
+  // downsample from 48kHz. Cheap (we run this once per utterance).
   const targetRate = 16000
-  const resampleRatio = targetRate / sampleRate
-  const resampledLength = Math.floor(audioData.length * resampleRatio)
-  const resampled = new Float32Array(resampledLength)
-
-  for (let i = 0; i < resampledLength; i++) {
-    const srcIdx = i / resampleRatio
-    const srcIdxFloor = Math.floor(srcIdx)
-    const srcIdxCeil = Math.min(srcIdxFloor + 1, audioData.length - 1)
-    const fraction = srcIdx - srcIdxFloor
-    resampled[i] = audioData[srcIdxFloor] * (1 - fraction) + audioData[srcIdxCeil] * fraction
+  let resampled
+  if (sampleRate === targetRate) {
+    resampled = audioData
+  } else {
+    const ratio = sampleRate / targetRate
+    const outLen = Math.floor(audioData.length / ratio)
+    resampled = new Float32Array(outLen)
+    const halfWindow = Math.max(1, Math.floor(ratio / 2))
+    for (let i = 0; i < outLen; i++) {
+      const center = i * ratio
+      const lo = Math.max(0, Math.floor(center) - halfWindow)
+      const hi = Math.min(audioData.length - 1, Math.floor(center) + halfWindow)
+      let sum = 0, n = 0
+      for (let j = lo; j <= hi; j++) { sum += audioData[j]; n++ }
+      resampled[i] = sum / n
+    }
   }
 
   try {
     const result = await asr(resampled, {
-      language: 'english',
+      language: 'en',
       task: 'transcribe',
-      // Default 0.6 — lower values reject too aggressively and let through
-      // hallucinations on near-silent input. Our VAD already filters silence
-      // upstream so we can trust Whisper's own no-speech detection.
+      // Trust Whisper's own no-speech detection (default 0.6). Our VAD already
+      // filters out frames below ACTIVE_RMS so most input is real speech.
       no_speech_threshold: 0.6,
+      // Each utterance is independent — don't condition on prior text.
       condition_on_previous_text: false,
-      // initial_prompt was biased to a specific character (cleetus); for a
-      // conversational bot this caused vocabulary drift / "you/Thank you"
-      // hallucinations. Leave Whisper neutral.
+      // Slight temperature beats 0.0 when audio is borderline; falls back
+      // through this list on no_speech / repeats.
+      temperature: [0.0, 0.2, 0.4],
+      // Reject hallucinations on quiet/garbled inputs.
+      compression_ratio_threshold: 2.4,
+      logprob_threshold: -1.0,
     })
-    const confidence = Math.min(1.0, result.text.length / 100.0)
-    return { text: result.text || '[no speech detected]', confidence: Math.max(0, Math.min(1, confidence)) }
+    const text = (result?.text || '').trim()
+    // result may include chunks[] with per-chunk no_speech_prob if available;
+    // fall back to text-length heuristic if not.
+    let confidence = 0.5
+    if (result?.chunks && result.chunks.length) {
+      const probs = result.chunks.map(c => 1 - (c.no_speech_prob ?? 0.5)).filter(Boolean)
+      if (probs.length) confidence = probs.reduce((a, b) => a + b, 0) / probs.length
+    } else if (text) {
+      confidence = Math.min(1.0, 0.3 + text.length / 200)
+    }
+    return { text: text || '[no speech detected]', confidence: Math.max(0, Math.min(1, confidence)) }
   } catch (err) {
     throw new Error(`Whisper transcription failed: ${err.message}`)
   }

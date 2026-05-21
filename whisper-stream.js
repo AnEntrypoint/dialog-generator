@@ -1,16 +1,21 @@
 import { transcribe } from './discord-whisper.js'
 
 const SAMPLE_RATE = 48000
-const DEBOUNCE_MS = 200
-// Require at least ~1s of audio before the first transcription pass —
-// transcribing tiny fragments (~200ms) leads to misrecognition like "you"
-// instead of the full sentence the user said. The user can still talk for
-// longer; subsequent re-transcriptions extend the window.
-const MIN_RETRANSCRIBE_SAMPLES = SAMPLE_RATE * Number(process.env.WHISPER_MIN_SECONDS || 0.9)
-// How long the transcript must stay unchanged before we fire it as "stable".
-// Higher = more user-pause-tolerant, fewer mid-sentence false fires.
-const STABILITY_MS = Number(process.env.WHISPER_STABILITY_MS || 600)
-const MIN_WORDS_TO_FIRE = Number(process.env.WHISPER_MIN_WORDS || 2)
+// Time of no speech frames before we consider the utterance ended and fire
+// Whisper on the accumulated audio. Discord PCM arrives in 20ms frames; the
+// VAD drops sub-threshold frames. So "no frame for N ms" == "user paused N ms".
+const UTTERANCE_END_SILENCE_MS = Number(process.env.WHISPER_UTTERANCE_END_MS || 700)
+// Minimum speech samples to bother transcribing. Below this it's a click or
+// throat-clear; Whisper hallucinates filler words on these.
+const MIN_UTTERANCE_SAMPLES = SAMPLE_RATE * Number(process.env.WHISPER_MIN_SECONDS || 0.4)
+// Maximum utterance length before forcing a transcribe even without silence.
+// Prevents unbounded buffering during a long monologue.
+const MAX_UTTERANCE_SECONDS = Number(process.env.WHISPER_MAX_SECONDS || 20)
+// Pad the start/end of an utterance with silence — Whisper was trained on
+// audio with natural silence around speech; concatenating pure-speech segments
+// confuses it and triggers hallucinated end-of-sentence tokens.
+const SILENCE_PAD_MS = Number(process.env.WHISPER_SILENCE_PAD_MS || 200)
+const MIN_WORDS_TO_FIRE = Number(process.env.WHISPER_MIN_WORDS || 1)
 
 const sessions = new Map()
 
@@ -19,17 +24,14 @@ function getSession(userId) {
     sessions.set(userId, {
       chunks: [],
       totalSamples: 0,
-      lastTranscribeAt: 0,
-      lastTranscribeSamples: 0,
+      lastFrameAt: 0,
       inFlight: false,
+      endTimer: null,
       latestText: '',
       latestConf: 0,
       listeners: [],
       stableListeners: [],
-      stableText: '',
-      stableSince: 0,
       lastFiredText: '',
-      stabilityTimer: null,
     })
   }
   return sessions.get(userId)
@@ -57,88 +59,71 @@ function wordCount(text) {
   return text.trim().split(/\s+/).filter(Boolean).length
 }
 
-function scheduleStabilityCheck(userId) {
+function scheduleUtteranceEnd(userId) {
   const s = sessions.get(userId)
   if (!s) return
-  if (s.stabilityTimer) clearTimeout(s.stabilityTimer)
-  const remain = Math.max(50, STABILITY_MS - (Date.now() - s.stableSince))
-  s.stabilityTimer = setTimeout(() => fireIfStable(userId), remain)
+  if (s.endTimer) clearTimeout(s.endTimer)
+  s.endTimer = setTimeout(() => endUtterance(userId), UTTERANCE_END_SILENCE_MS)
 }
 
-function fireIfStable(userId) {
+async function endUtterance(userId) {
   const s = sessions.get(userId)
   if (!s) return
-  s.stabilityTimer = null
-  const text = s.latestText
-  if (isSentinel(text)) return
-  if (text !== s.stableText) return
-  if (Date.now() - s.stableSince < STABILITY_MS) { scheduleStabilityCheck(userId); return }
-  if (wordCount(text) < MIN_WORDS_TO_FIRE) return
-  if (text === s.lastFiredText) return
-  s.lastFiredText = text
-  const conf = s.latestConf
-  console.log(`[stream] uid=${userId} ⚡ stable "${text.slice(0,80)}" conf=${conf.toFixed(2)} — firing`)
-  clear(userId)
-  for (const fn of s.stableListeners) try { fn(text, conf) } catch (e) { console.error('[stream] stable listener err:', e.message) }
+  s.endTimer = null
+  if (s.inFlight) return                              // already transcribing this user
+  if (s.totalSamples < MIN_UTTERANCE_SAMPLES) {       // too short — discard
+    if (s.totalSamples > 0) {
+      console.log(`[stream] uid=${userId} discarding short utterance (${s.totalSamples} samples)`)
+    }
+    s.chunks = []; s.totalSamples = 0
+    return
+  }
+  s.inFlight = true
+  const samples = s.totalSamples
+  // Merge speech frames + add silence padding so Whisper sees natural audio
+  const padSamples = Math.floor((SILENCE_PAD_MS / 1000) * SAMPLE_RATE)
+  const merged = new Float32Array(padSamples + samples + padSamples)
+  let off = padSamples
+  for (const c of s.chunks) { merged.set(c, off); off += c.length }
+  s.chunks = []; s.totalSamples = 0
+  const t0 = Date.now()
+  try {
+    const result = await transcribe(merged, SAMPLE_RATE)
+    const text = (result.text || '').trim()
+    s.latestText = text
+    s.latestConf = result.confidence
+    const tookMs = Date.now() - t0
+    if (!text || isSentinel(text)) {
+      console.log(`[stream] uid=${userId} STT ${tookMs}ms samples=${samples} → (no speech, conf=${result.confidence.toFixed(2)})`)
+    } else if (wordCount(text) < MIN_WORDS_TO_FIRE) {
+      console.log(`[stream] uid=${userId} STT ${tookMs}ms samples=${samples} → too short: "${text}"`)
+    } else if (text === s.lastFiredText) {
+      console.log(`[stream] uid=${userId} STT ${tookMs}ms → duplicate of last fire: "${text}"`)
+    } else {
+      s.lastFiredText = text
+      console.log(`[stream] uid=${userId} STT ${tookMs}ms samples=${samples} ⚡ "${text.slice(0,80)}" conf=${result.confidence.toFixed(2)}`)
+      for (const fn of s.stableListeners) try { fn(text, result.confidence) } catch (e) { console.error('[stream] stable listener err:', e.message) }
+      for (const fn of s.listeners) try { fn(text, result.confidence, '') } catch {}
+    }
+  } catch (err) {
+    console.error(`[stream] uid=${userId} transcribe error:`, err.message)
+  } finally {
+    s.inFlight = false
+  }
 }
 
 export function pushFrame(userId, f32Frame) {
   const s = getSession(userId)
   s.chunks.push(f32Frame)
   s.totalSamples += f32Frame.length
-  maybeRetranscribe(userId)
-}
-
-function chunksToPcmBuffer(chunks) {
-  const total = chunks.reduce((a, c) => a + c.length, 0)
-  const merged = new Float32Array(total)
-  let off = 0
-  for (const c of chunks) { merged.set(c, off); off += c.length }
-  const int16 = new Int16Array(merged.length)
-  for (let i = 0; i < merged.length; i++) {
-    const v = Math.max(-1, Math.min(1, merged[i]))
-    int16[i] = v < 0 ? v * 0x8000 : v * 0x7FFF
+  s.lastFrameAt = Date.now()
+  // If utterance is getting too long, force a transcribe even without silence
+  if (s.totalSamples >= MAX_UTTERANCE_SECONDS * SAMPLE_RATE) {
+    if (s.endTimer) { clearTimeout(s.endTimer); s.endTimer = null }
+    endUtterance(userId)
+    return
   }
-  return Buffer.from(int16.buffer)
-}
-
-async function maybeRetranscribe(userId) {
-  const s = getSession(userId)
-  if (s.inFlight) return
-  const now = Date.now()
-  const newSinceLast = s.totalSamples - s.lastTranscribeSamples
-  if (newSinceLast < MIN_RETRANSCRIBE_SAMPLES) return
-  if (now - s.lastTranscribeAt < DEBOUNCE_MS) return
-
-  s.inFlight = true
-  const snapshotSamples = s.totalSamples
-  const pcmBuffer = chunksToPcmBuffer(s.chunks)
-  const t0 = Date.now()
-  try {
-    const result = await transcribe(pcmBuffer, SAMPLE_RATE)
-    const text = (result.text || '').trim()
-    const prev = s.latestText
-    s.latestText = text
-    s.latestConf = result.confidence
-    s.lastTranscribeAt = Date.now()
-    s.lastTranscribeSamples = snapshotSamples
-    console.log(`[stream] uid=${userId} streaming STT ${Date.now()-t0}ms samples=${snapshotSamples} → "${text.slice(0,60)}"`)
-    if (text !== s.stableText) {
-      s.stableText = text
-      s.stableSince = Date.now()
-    }
-    if (!isSentinel(text) && wordCount(text) >= MIN_WORDS_TO_FIRE) {
-      scheduleStabilityCheck(userId)
-    }
-    if (text && text !== prev) {
-      for (const fn of s.listeners) try { fn(text, result.confidence, prev) } catch {}
-    }
-  } catch (err) {
-    console.error(`[stream] uid=${userId} transcribe error:`, err.message)
-  } finally {
-    s.inFlight = false
-    setTimeout(() => maybeRetranscribe(userId), 50)
-  }
+  scheduleUtteranceEnd(userId)
 }
 
 export function getLatest(userId) {
@@ -152,12 +137,9 @@ export function clear(userId) {
   if (!s) return
   s.chunks = []
   s.totalSamples = 0
-  s.lastTranscribeSamples = 0
   s.latestText = ''
   s.latestConf = 0
-  s.stableText = ''
-  s.stableSince = 0
-  if (s.stabilityTimer) { clearTimeout(s.stabilityTimer); s.stabilityTimer = null }
+  if (s.endTimer) { clearTimeout(s.endTimer); s.endTimer = null }
 }
 
 export function onPartial(userId, fn) {
