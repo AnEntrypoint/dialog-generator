@@ -134,7 +134,13 @@ const stageHandlers = {
     state._chunksPlayed = 0
     const onChunk = (audio, sr) => {
       if (abort.signal.aborted || !state.audioSink) return
-      state.audioSink(resampleAudio(audio, sr || SAMPLE_RATE_TTS_FALLBACK, SAMPLE_RATE_DISCORD), text)
+      // Chatterbox occasionally produces peaks > 1.0; hard-clipping in the
+      // sink causes audible distortion. Soft-attenuate before resample so the
+      // entire chain stays inside [-1, 1] without losing dynamics.
+      const out = resampleAudio(audio, sr || SAMPLE_RATE_TTS_FALLBACK, SAMPLE_RATE_DISCORD)
+      const TTS_GAIN = Number(process.env.TTS_GAIN || 0.8)
+      if (TTS_GAIN !== 1) for (let i = 0; i < out.length; i++) out[i] *= TTS_GAIN
+      state.audioSink(out, text)
       chunksPlayed++
       state._chunksPlayed = chunksPlayed
     }
