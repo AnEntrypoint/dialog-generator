@@ -2,7 +2,7 @@ import { initVRM, setVRMPaused } from './vrm-viewer.js'
 import { startTTS, isTtsReady, onVoiceChange, speak, stopSpeak } from './app-tts.js?v=5'
 import { buildPersonaHistory } from './app-persona.js'
 
-const worker = new Worker('./worker.js?v=65', { type: 'module' })
+const worker = new Worker('./worker-bonsai-webgpu.js?v=1', { type: 'module' })
 const SpeechRecognition = window.SpeechRecognition ?? window.webkitSpeechRecognition
 const $ = (id) => document.getElementById(id)
 const history = []
@@ -29,23 +29,58 @@ function sendWorker(msg) {
 	})
 }
 worker.onmessage = (e) => {
-	const { type, id, progress, message, token } = e.data
+	const { type, id, progress, message, token, text, status, model } = e.data
+
+	// Progress updates
 	if (type === 'progress') {
 		if (!modelReady) {
 			$('progress-wrap').hidden = false
 			$('progress-bar').style.width = `${Math.round(progress?.progress ?? 0)}%`
-			$('progress-text').textContent = progress?.file || 'Loading model…'
+			$('progress-text').textContent = progress?.loaded ? `${Math.round(progress.loaded / 1024 / 1024)}MB / ${Math.round(progress.total / 1024 / 1024)}MB` : 'Loading…'
 		}
 		return
 	}
-	if (type === 'token') { const last = $('chat').querySelector('.bubble.assistant:last-child'); if (last) last.textContent += token; return }
+
+	// Streaming tokens
+	if (type === 'token') {
+		const last = $('chat').querySelector('.bubble.assistant:last-child')
+		if (last) last.textContent += token
+		return
+	}
+
+	// Status updates (from new worker)
+	if (type === 'status') {
+		if (status === 'ready') {
+			const r = pendingResolvers[id]
+			if (r) {
+				delete pendingResolvers[id]
+				r.resolve({ device: 'webgpu', model })
+			}
+		}
+		return
+	}
+
+	// Completion (from new worker)
+	if (type === 'result') {
+		const r = pendingResolvers[id]
+		if (r) {
+			delete pendingResolvers[id]
+			r.resolve({ text })
+		}
+		return
+	}
+
+	// Errors
 	if (type === 'error' && id == null) {
 		const msg = message || 'Worker error'
 		Object.values(pendingResolvers).forEach(r => r.reject(new Error(msg)))
 		Object.keys(pendingResolvers).forEach(k => delete pendingResolvers[k])
 		return
 	}
-	const r = pendingResolvers[id]; if (!r) return
+
+	// Handle legacy responses
+	const r = pendingResolvers[id]
+	if (!r) return
 	delete pendingResolvers[id]
 	if (type === 'error') r.reject(new Error(message)); else r.resolve(e.data)
 }
