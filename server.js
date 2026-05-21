@@ -255,6 +255,15 @@ app.get('/debug/tts', async (req, res) => {
   }
 })
 
+app.get('/debug/whisper', async (req, res) => {
+  try {
+    const { getWhisperInfo } = await import('./discord-whisper.js')
+    res.json(getWhisperInfo())
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.get('/debug/discord', (req, res) => {
   if (!getDebugState) return res.status(503).json({ error: 'Discord not enabled' })
   try {
@@ -304,6 +313,24 @@ async function start() {
     loadLipsync()
   }
   await loadVoiceEmbedding()
+
+  // Warm up Whisper — loading whisper-large-v3-turbo on DirectML can take
+  // 5-10s the first time; without warmup the first user utterance pays it.
+  if (process.env.WARMUP_WHISPER !== 'false' && (process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN)) {
+    try {
+      console.log('[server] Warming up Whisper STT (model load + first inference)...')
+      const warmupStart = performance.now()
+      const { transcribe } = await import('./discord-whisper.js')
+      // 1 second of silence at 48kHz int16, mono — just enough to exercise
+      // both encoder and decoder paths without producing spurious text.
+      const silentBuf = Buffer.alloc(48000 * 2)
+      await transcribe(silentBuf, 48000).catch(() => {})
+      const warmupTime = ((performance.now() - warmupStart) / 1000).toFixed(1)
+      console.log(`[server] Whisper warmup complete (${warmupTime}s)`)
+    } catch (err) {
+      console.warn('[server] Whisper warmup failed (non-critical):', err.message)
+    }
+  }
 
   // Warm up TTS — pays the one-time CUDA-graph-capture cost up front so the
   // first user utterance is already at warm-streaming latency (~700ms first chunk)

@@ -7,24 +7,66 @@ env.cacheDir = path.join(__dirname, 'models', 'whisper')
 env.localModelPath = path.join(__dirname, 'models', 'whisper')
 env.allowRemoteModels = true
 
+// Model & device. We default to whisper-small q8 on CPU after testing every
+// GPU path available to onnxruntime-node 1.24.1 on Windows x64:
+//
+//   - DirectML (`dml`): model LOADS fine on DML but generation produces
+//     "token_ids must be a non-empty array of integers" — transformers.js
+//     decoder path is broken on the DML EP for every dtype we tried (q8,
+//     q4f16, fp16, fp32). Witnessed 2026-05-21. Not fixable client-side.
+//   - WebGPU (`webgpu`): loads but produces garbage output ("the" for any
+//     5s clip). Same decoder issue surfaces differently.
+//   - CUDA (`cuda`): not bundled in onnxruntime-node — only dml/webgpu/cpu.
+//   - q4f16 dtype: ORT graph init fails ("InsertedPrecisionFreeCast_...") —
+//     bug in the q4f16 ONNX model files themselves.
+//
+// So CPU is the only working path right now. whisper-small q8 takes ~1.7s
+// for 1s of audio (vs whisper-base ~1.5s) but transcribes substantially
+// better — full sentences instead of fragments.
+//
+// To override (e.g. when transformers.js/ORT fixes the DML decoder):
+//   WHISPER_MODEL=onnx-community/whisper-large-v3-turbo WHISPER_DTYPE=fp16 WHISPER_DEVICE=dml
+const WHISPER_MODEL = process.env.WHISPER_MODEL || 'onnx-community/whisper-small'
+const WHISPER_DTYPE = process.env.WHISPER_DTYPE || 'q8'
+const WHISPER_DEVICE = process.env.WHISPER_DEVICE || 'cpu'
+
 let whisperPipeline = null
 let pipelineInitPromise = null
+let pipelineActualDevice = null
 
 async function initPipeline() {
   if (whisperPipeline) return whisperPipeline
   if (pipelineInitPromise) return pipelineInitPromise
 
   pipelineInitPromise = (async () => {
+    const t0 = Date.now()
+    const attempt = async (model, dtype, device) => {
+      console.log(`[whisper] loading ${model} dtype=${dtype} device=${device}...`)
+      const p = await pipeline('automatic-speech-recognition', model, { dtype, device })
+      console.log(`[whisper] loaded in ${Date.now() - t0}ms (${model} ${dtype} ${device})`)
+      pipelineActualDevice = device
+      return p
+    }
     try {
-      whisperPipeline = await pipeline('automatic-speech-recognition', 'Xenova/whisper-base', { dtype: 'q8' })
+      whisperPipeline = await attempt(WHISPER_MODEL, WHISPER_DTYPE, WHISPER_DEVICE)
       return whisperPipeline
     } catch (err) {
-      pipelineInitPromise = null
-      throw new Error(`Whisper pipeline initialization failed: ${err.message}`)
+      console.warn(`[whisper] primary load failed (${err.message}); falling back to CPU/whisper-base/q8`)
+      try {
+        whisperPipeline = await attempt('Xenova/whisper-base', 'q8', 'cpu')
+        return whisperPipeline
+      } catch (err2) {
+        pipelineInitPromise = null
+        throw new Error(`Whisper pipeline initialization failed: ${err2.message}`)
+      }
     }
   })()
 
   return pipelineInitPromise
+}
+
+export function getWhisperInfo() {
+  return { model: WHISPER_MODEL, dtype: WHISPER_DTYPE, device: pipelineActualDevice, loaded: Boolean(whisperPipeline) }
 }
 
 export async function transcribe(pcmBuffer, sampleRate = 48000) {
@@ -57,13 +99,16 @@ export async function transcribe(pcmBuffer, sampleRate = 48000) {
 
   try {
     const result = await asr(resampled, {
-      chunk_length_s: 30,
-      stride_length_s: 5,
       language: 'english',
       task: 'transcribe',
-      no_speech_threshold: 0.2,
+      // Default 0.6 — lower values reject too aggressively and let through
+      // hallucinations on near-silent input. Our VAD already filters silence
+      // upstream so we can trust Whisper's own no-speech detection.
+      no_speech_threshold: 0.6,
       condition_on_previous_text: false,
-      initial_prompt: 'Cleetus, the gas station owner, talking with customers.',
+      // initial_prompt was biased to a specific character (cleetus); for a
+      // conversational bot this caused vocabulary drift / "you/Thank you"
+      // hallucinations. Leave Whisper neutral.
     })
     const confidence = Math.min(1.0, result.text.length / 100.0)
     return { text: result.text || '[no speech detected]', confidence: Math.max(0, Math.min(1, confidence)) }
