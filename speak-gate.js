@@ -4,7 +4,10 @@ import { resampleAudio } from './server-utils.mjs'
 
 const SAMPLE_RATE_DISCORD = 48000
 const SAMPLE_RATE_TTS_FALLBACK = 24000
-const DEBOUNCE_MS = Number(process.env.GATE_DEBOUNCE_MS || 1000)
+const DEBOUNCE_MS = Number(process.env.GATE_DEBOUNCE_MS || 600)
+// Skip the LLM gate call for messages that are clearly worth a reply — saves
+// ~1s round-trip per turn. The gate prompt says "YES by default" anyway.
+const GATE_LLM_THRESHOLD_CHARS = Number(process.env.GATE_LLM_THRESHOLD_CHARS || 8)
 const STAGE_TIMEOUT = {
   GATING: Number(process.env.GATE_TIMEOUT_GATING_MS || 5000),
   ANSWERING: Number(process.env.GATE_TIMEOUT_ANSWER_MS || 15000),
@@ -32,7 +35,10 @@ const state = {
   lastWhisperAt: 0, lastDecision: null,
   audioSink: null, refPath: null, refText: null, characterPrompt: null,
   history: [], activeSpeakers: new Map(),
-  metrics: { gateYes: 0, gateNo: 0, abortsByStage: { GATING: 0, ANSWERING: 0, SPEAKING: 0 }, timeouts: 0, spoken: 0 },
+  metrics: {
+    gateYes: 0, gateNo: 0, abortsByStage: { GATING: 0, ANSWERING: 0, SPEAKING: 0 },
+    timeouts: 0, spoken: 0, lastAnswerMs: null, lastTtsFirstChunkMs: null,
+  },
 }
 
 function setState(next, reason = '') {
@@ -103,25 +109,47 @@ async function runStage(stage) {
 const stageHandlers = {
   GATING: async (abort) => {
     if (!(await isLLMAvailable())) { setState('LISTENING', 'LLM offline'); return }
+
+    // Fast-path: skip the LLM gate call for clearly substantive messages.
+    // The gate prompt itself says "YES by default" — a separate ~1s round-trip
+    // per turn just to confirm that is wasteful. Only ask the LLM when the
+    // message is short enough to be plausibly a filler ("yeah", "hm", "ok").
+    const last = state.history[state.history.length - 1]
+    const lastUserText = (last && last.role === 'user' ? last.text : '').trim()
+    if (lastUserText.length >= GATE_LLM_THRESHOLD_CHARS) {
+      const t = Date.now() - state.enteredAt
+      state.lastDecision = { decision: 'YES', at: Date.now(), source: 'fastpath', latencyMs: t }
+      state.metrics.gateYes++
+      console.log(`[gate] decision=YES (fastpath, chars=${lastUserText.length}, ${t}ms)`)
+      runStage('ANSWERING')
+      return
+    }
+
+    const t0 = Date.now()
     const grammar = await getYesNoGrammar()
     const raw = await generateLLM(`${buildContext()}\n\n${GATE_PROMPT}\n\nDecision:`, state.characterPrompt || undefined, abort.signal, { grammar, maxTokens: 4 })
     if (state.abort !== abort) return
+    const latencyMs = Date.now() - t0
     const decision = (raw || '').trim().toUpperCase().startsWith('Y') ? 'YES' : 'NO'
-    state.lastDecision = { decision, at: Date.now() }
+    state.lastDecision = { decision, at: Date.now(), source: 'llm', latencyMs }
     state.metrics[decision === 'YES' ? 'gateYes' : 'gateNo']++
-    console.log(`[gate] decision=${decision} raw="${(raw || '').slice(0, 20)}"`)
+    console.log(`[gate] decision=${decision} (llm ${latencyMs}ms) raw="${(raw || '').slice(0, 20)}"`)
     if (decision === 'YES') runStage('ANSWERING')
     else setState('LISTENING', 'gate=NO')
   },
   ANSWERING: async (abort) => {
+    const t0 = Date.now()
     const now = Date.now()
     const recent = [...state.activeSpeakers.values()].filter(s => now - s.lastWordAt < 5000)
     const multiHint = recent.length >= 2
       ? `\n\nMultiple people just spoke at the same time: ${recent.map(s => s.username).join(' and ')}. Address both in your one reply.`
       : ''
-    const raw = await generateLLM(`${buildContext()}${multiHint}\n\nReply with the bot's next spoken turn. Keep it conversational and short.`, state.characterPrompt || undefined, abort.signal, { maxTokens: 80 })
+    const raw = await generateLLM(`${buildContext()}${multiHint}\n\nReply with the bot's next spoken turn. Keep it conversational and short.`, state.characterPrompt || undefined, abort.signal, { maxTokens: 50 })
     if (state.abort !== abort) return
+    const latencyMs = Date.now() - t0
+    state.metrics.lastAnswerMs = latencyMs
     const text = (raw || '').trim().slice(0, MAX_RESPONSE_CHARS)
+    console.log(`[gate] answer ${latencyMs}ms chars=${text.length} "${text.slice(0,40)}"`)
     if (!text) { setState('LISTENING', 'empty answer'); return }
     state._pendingResponse = text
     runStage('SPEAKING')
@@ -132,8 +160,13 @@ const stageHandlers = {
     if (!text) { setState('LISTENING', 'no text'); return }
     let chunksPlayed = 0
     state._chunksPlayed = 0
+    const speakStart = Date.now()
     const onChunk = (audio, sr) => {
       if (abort.signal.aborted || !state.audioSink) return
+      if (chunksPlayed === 0) {
+        state.metrics.lastTtsFirstChunkMs = Date.now() - speakStart
+        console.log(`[gate] tts first-chunk ${state.metrics.lastTtsFirstChunkMs}ms`)
+      }
       // Chatterbox occasionally produces peaks > 1.0; hard-clipping in the
       // sink causes audible distortion. Soft-attenuate before resample so the
       // entire chain stays inside [-1, 1] without losing dynamics.

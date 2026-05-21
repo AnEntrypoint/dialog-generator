@@ -1,5 +1,7 @@
 // Remote LLM adapter — talks to chatjimmy.ai (free public endpoint).
 // Mirrors the API surface of ./llm-llamacpp.js so it can drop in via ./llm.js dispatcher.
+// Note: Node's built-in fetch (undici) already pools connections with keepAlive
+// by default, so back-to-back calls reuse the TLS session automatically.
 
 const BASE = process.env.CJ_BASE || 'https://chatjimmy.ai'
 const DEFAULT_MODEL = process.env.CJ_MODEL || 'llama3.1-8B'
