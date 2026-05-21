@@ -11,31 +11,58 @@ After `git clone`, run `git lfs pull` to fetch weights (~2 GB). Verify with `nod
 **Browser demo (raw git blobs, NOT LFS):** GitHub Pages serves raw git blobs and does not resolve LFS pointers, so the browser ONNX model must stay as plain bytes. To stay under GitHub's per-file limit, `gh-pages-src/demo/model/onnx/*.onnx` is split into `≤99MB` `.part*` chunks. These paths carry explicit LFS exclusions in `.gitattributes` (`!filter !diff !merge -text`). The fetch interceptor in `gh-pages-src/demo/worker.js` reassembles the parts at load time.
 The browser voice safetensors (`gh-pages-src/demo/voices/*.safetensors`) and `Cleetus.vrm` are also excluded from LFS for the same reason.
 
-## Browser Demo Model — Non-Negotiable
+## LLM Strategy — Bonsai Across Board
 
-The browser demo uses Qwen3.5-VL 0.8B abliterated with identity-override LoRA merged, quantized to q4 ONNX.
-- Source: bobber/routangseng-qwen35-0.8b-abliterated-lora-onnx (HuggingFace)
-- Quantization: q4 via MatMulNBitsQuantizer (decoder), fp16 (embed_tokens, WebGPU), q8 (vision_encoder)
-- Delivery: raw git blobs split into ≤99MB chunks served from GitHub Pages. No LFS on this path — LFS would break Pages delivery.
+Both server and browser use **Bonsai** (1-bit quantized, onnx-community) for maximum compression and speed. Different runtimes reflect different deployment constraints:
 
-### Local Model Path Resolution — @huggingface/transformers v4
+| Component | Model | Format | Runtime | Reference |
+|-----------|-------|--------|---------|-----------|
+| **Server** (Node.js, Discord bot) | Bonsai-8B-Q1_0 | GGUF | llama.cpp via node-llama-cpp | `models/llm/Bonsai-8B-Q1_0.gguf` (1.1 GB) |
+| **Browser** (Web worker, GitHub Pages) | Bonsai-1.7B-ONNX | ONNX | @huggingface/transformers v4 + WebGPU | `gh-pages-src/demo/worker-bonsai-webgpu.js` |
 
-The browser loads bundled ONNX models from local paths instead of HuggingFace Hub via `env` configuration:
+**Why two formats?**
+- Server: llama.cpp (GPU-accelerated C++ runtime) has no ONNX support; GGUF is optimized for llama.cpp
+- Browser: transformers.js v4 (JS runtime) has no GGUF support; ONNX is optimized for WebGPU
+- Both preserve 1-bit quantization (ternary weights) and FP16 group scales for accuracy
 
+**Performance** (RTX 3060 Laptop):
+- Server: 128ms warm generation (token output after init), 2.3s `getLlama()` startup
+- Browser: WebGPU-capable device: similar; fallback CPU: ~5–30s per inference
+
+## Browser Demo LLM — Bonsai-WebGPU
+
+The browser demo now uses **Bonsai-1.7B-ONNX** (1-bit quantized) via the **bonsai-webgpu Space** inference engine.
+
+### Architecture
+
+**Worker**: `gh-pages-src/demo/worker-bonsai-webgpu.js`
+- Directly implements the [bonsai-webgpu Space](https://huggingface.co/spaces/webml-community/bonsai-webgpu)
+- Uses `@huggingface/transformers` v4 pipeline API
+- Device: `"webgpu"` (W3C GPU API, fallback to CPU for older browsers)
+- Quantization: `dtype: "q1"` (1-bit ternary: -1, 0, +1 weights with FP16 scales)
+- Model auto-downloads from HuggingFace Hub on first load (transformers.js v4 cache)
+
+**Model Sizes Available**:
 ```javascript
-import { env } from '@huggingface/transformers';
-env.allowRemoteModels = false;  // Force local-only, disable Hub fallback
-env.localModelPath = './model/chatterbox/';  // Base directory for all models
+const MODEL_IDS = {
+  "1.7b": "onnx-community/Bonsai-1.7B-ONNX",    // ~230 MB (default)
+  "4b": "onnx-community/Bonsai-4B-ONNX",        // ~520 MB
+  "8b": "onnx-community/Bonsai-8B-ONNX",        // ~1.1 GB
+};
 ```
 
-Path resolution: `finalPath = pathJoin(env.localModelPath, repo_id, filename)`
+**Message Protocol** (`app.js` ↔ worker):
+- `type: 'load'` → loads model, emits `'progress'` and `'status': 'ready'`
+- `type: 'generate'` → LLM inference, emits `'token'` (streaming), `'result'` (complete)
+- `type: 'check'` → WebGPU support detection
+- `type: 'interrupt'` → stops in-flight generation
+- `type: 'reset'` → clears KV cache for new conversation
 
-Example:
-- Config: `env.localModelPath = './model/chatterbox/'`
-- Call: `from_pretrained('ResembleAI/chatterbox-turbo-ONNX')`
-- Resolves: `./model/chatterbox/ResembleAI/chatterbox-turbo-ONNX/onnx/embed_tokens_q4f16.onnx`
-
-The resolved URL goes through browser `fetch()`, where the Service Worker or fetch interceptor in `gh-pages-src/demo/worker.js` intercepts it and reassembles bundled `.part*` chunks on-demand. This pattern allows delivering large ONNX models as locally-bundled files without a CDN, staying under GitHub's per-file limits.
+**App Handler** (`app.js:31–86`):
+- `'progress'`: {loaded, total} in bytes (vs old file string)
+- `'token'`: streaming text append
+- `'status': 'ready'`: resolves `sendWorker()` promise with device info
+- `'result'`: resolves `sendWorker()` with generated text
 
 ## Dependencies
 
