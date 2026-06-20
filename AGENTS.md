@@ -13,3 +13,5 @@
 ## Learning audit
 
 - 2026-04-28: initial creation; 0 items checked, 0 removed, 0 refined.
+
+@.gm/next-step.md

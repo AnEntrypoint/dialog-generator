@@ -1,3 +1,4 @@
+@AGENTS.md
 # Diagen Project Notes
 
 ## Model Distribution — Git LFS

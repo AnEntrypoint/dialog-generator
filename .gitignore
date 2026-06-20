@@ -64,3 +64,11 @@ dist/
 .gm/prd.paused.yml
 # tracked: .gm/rs-learn.db, .gm/code-search/, AGENTS.md, .gm/prd.yml
 # <<< gm managed
+.gm/pw-sock-*/
+# LuxTTS export tooling: isolated python venv + reference clone + WIP artifacts
+.venv-lux/
+.tmp-luxtts/
+models/tts/
+# transient whisper model downloads (pre-existing untracked)
+models/whisper/Xenova/whisper-base/onnx/
+models/whisper/onnx-community/
