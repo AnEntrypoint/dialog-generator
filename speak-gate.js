@@ -2,6 +2,7 @@ import { generate as generateLLM, isAvailable as isLLMAvailable, buildGrammar } 
 // LuxTTS (ZipVoice-distill, 4-step) replaces F5 — ~3x faster, already 48kHz so
 // the resampleAudio(audio, 48000, 48000) below is a no-op (ratio 1).
 import { synthesizeStream, setRefVoice as _setRefVoice } from './lux-tts-bridge.js'
+import { appendTurn as appendTranscript } from './transcript-logger.mjs'
 import { resampleAudio } from './server-utils.mjs'
 
 const SAMPLE_RATE_DISCORD = 48000
@@ -59,10 +60,24 @@ function abortCurrent(reason) {
   state.abort = null
 }
 
+function logTurn(h) {
+  if (!h || h._logged) return
+  h._logged = true
+  try { appendTranscript({ role: h.role, username: h.username, text: h.text, ts: h.timestamp }) } catch {}
+}
+
 function snapHistory(role, text, username = null) {
   if (!text) return
-  state.history.push({ role, username, text, timestamp: Date.now() })
-  if (state.history.length > MAX_HISTORY) state.history.splice(0, state.history.length - MAX_HISTORY)
+  const entry = { role, username, text, timestamp: Date.now() }
+  state.history.push(entry)
+  if (role === 'bot') logTurn(entry)                       // bot turns are final on write
+  // earlier turns are now superseded (final). The last entry may still be a
+  // user turn growing in place (noteWhisperWord), so leave it until superseded.
+  for (let i = 0; i < state.history.length - 1; i++) logTurn(state.history[i])
+  if (state.history.length > MAX_HISTORY) {
+    const removed = state.history.splice(0, state.history.length - MAX_HISTORY)
+    for (const h of removed) logTurn(h)                     // never drop an unlogged turn
+  }
 }
 
 function buildContext() {
@@ -73,7 +88,14 @@ function buildContext() {
 
 function armDebounce() {
   if (state.debounceTimer) clearTimeout(state.debounceTimer)
-  state.debounceTimer = setTimeout(() => { state.debounceTimer = null; if (state.name === 'WAITING') runStage('GATING') }, DEBOUNCE_MS)
+  state.debounceTimer = setTimeout(() => {
+    state.debounceTimer = null
+    // The user just finished a sentence (silence past the debounce) -> log it now,
+    // in time order, so it precedes the bot's reply in the transcript.
+    const last = state.history[state.history.length - 1]
+    if (last && last.role === 'user') logTurn(last)
+    if (state.name === 'WAITING') runStage('GATING')
+  }, DEBOUNCE_MS)
 }
 
 const onWhisperAbort = (reason) => () => { abortCurrent(reason); setState('WAITING', 'aborted by whisper'); armDebounce() }
