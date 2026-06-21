@@ -89,8 +89,10 @@ export async function sample(sessions, inp) {
     x = next
   }
 
-  // strip the prompt prefix: x[:, promptFramesLen:, :]
-  const frames = numFrames - inp.promptFramesLen
+  // strip the prompt prefix: x[:, promptFramesLen:, :]. Clamp >= 0: a too-high
+  // speed can make the text_encoder return numFrames < promptFramesLen, which
+  // otherwise crashes with a negative typed-array length.
+  const frames = Math.max(0, numFrames - inp.promptFramesLen)
   const out = new Float32Array(frames * F)
   out.set(x.subarray(inp.promptFramesLen * F))
   return { data: out, frames }

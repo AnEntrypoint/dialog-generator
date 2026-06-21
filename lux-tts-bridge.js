@@ -55,7 +55,9 @@ let GUIDANCE = Number(process.env.LUX_GUIDANCE || 3.0)
 // NB: lux-core multiplies this by 1.3 internally (reference quirk). speed=1.0
 // over-compresses short utterances (a full sentence collapsed to ~0.3s). 0.5
 // (effective 0.65) yields natural duration at RTF ~1. Tune via LUX_SPEED.
-let SPEED = Number(process.env.LUX_SPEED || 0.5)
+// 0.7 gives natural sentence duration (0.5 over-extended -> every reply hit the
+// 768-frame vocos cap = ~8s of audio regardless of length; 0.8 was too rushed).
+let SPEED = Number(process.env.LUX_SPEED || 0.7)
 let REF_SECONDS = Number(process.env.LUX_REF_SECONDS || 5)
 const TARGET_PEAK = Number(process.env.LUX_TARGET_PEAK || 0.85) // normalize output to audible level
 let SEED = Number(process.env.LUX_SEED || 666)
@@ -103,30 +105,33 @@ function splitSentences(text) {
   if (buf.trim()) chunks.push(buf.trim())
   return chunks.length ? chunks : [text]
 }
+// GREEDILY pack the whole reply into as few chunks as fit the 768-frame vocos
+// window (MAX_CHUNK_CHARS). A normal reply is ONE chunk -> one contiguous synth
+// -> seamless audio (no inter-sentence gap). Only a reply longer than the window
+// splits, at sentence boundaries (an over-long single sentence word-splits). Per
+// chunk lux is RTF<1, so the next chunk is ready before the current finishes.
 function splitTextIntoChunks(text) {
   const trimmed = text.trim()
   if (!trimmed) return []
   const chunks = []
   let cur = ''
+  const flush = () => { if (cur) { chunks.push(cur); cur = '' } }
   for (const s of splitSentences(trimmed)) {
-    if (cur && (cur.length < 24 || s.length < 24) && (cur + ' ' + s).length <= MAX_CHUNK_CHARS) {
-      cur = cur + ' ' + s; continue
+    if (s.length > MAX_CHUNK_CHARS) {
+      flush()
+      let w = ''
+      for (const word of s.split(/\s+/)) {
+        if (w && (w + ' ' + word).length > MAX_CHUNK_CHARS) { chunks.push(w); w = word }
+        else w = w ? w + ' ' + word : word
+      }
+      cur = w
+      continue
     }
-    if (cur) chunks.push(cur)
-    cur = s
+    if (cur && (cur + ' ' + s).length > MAX_CHUNK_CHARS) flush()
+    cur = cur ? cur + ' ' + s : s
   }
-  if (cur) chunks.push(cur)
-  const out = []
-  for (const c of chunks) {
-    if (c.length <= MAX_CHUNK_CHARS) { out.push(c); continue }
-    let w = ''
-    for (const word of c.split(/\s+/)) {
-      if (w && (w + ' ' + word).length > MAX_CHUNK_CHARS) { out.push(w); w = word }
-      else w = w ? w + ' ' + word : word
-    }
-    if (w) out.push(w)
-  }
-  return out
+  flush()
+  return chunks
 }
 
 // ---------------------------------------------------------------------------
