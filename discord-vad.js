@@ -102,7 +102,7 @@ function getOrCreateBuffer(userId) {
     console.log(`[vad] new buffer for uid=${userId}`)
     const fire = (text, conf) => {
       const username = _usernameResolver(userId)
-      speakGate.noteWhisperWord({ userId, username, text })
+      speakGate.noteWhisperWord({ userId, username, text, confidence: conf })
     }
     onPartial(userId, fire)
     onStable(userId, fire)

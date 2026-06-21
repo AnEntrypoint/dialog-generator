@@ -23,7 +23,10 @@ const STAGE_TIMEOUT = {
 const MAX_RESPONSE_CHARS = Number(process.env.GATE_MAX_RESPONSE_CHARS || 600)
 // Token budget for the spoken reply. 50 cut responses off mid-sentence; allow a
 // normal sentence-or-two reply. TTS streams per sentence so length != huge delay.
-const ANSWER_MAX_TOKENS = Number(process.env.GATE_ANSWER_MAX_TOKENS || 110)
+const ANSWER_MAX_TOKENS = Number(process.env.GATE_ANSWER_MAX_TOKENS || 60)
+// Whisper confidence floor. Below this the transcription is likely noise/cross-talk
+// garbled into real-looking words -> drop it rather than feed the LLM garbage.
+const MIN_CONFIDENCE = Number(process.env.GATE_MIN_CONFIDENCE || 0.30)
 const MAX_HISTORY = 12
 
 const GATE_PROMPT = [
@@ -285,8 +288,15 @@ function isBotEcho(text) {
   return hit / w.length >= ECHO_OVERLAP
 }
 
-export function noteWhisperWord({ userId, username, text }) {
+export function noteWhisperWord({ userId, username, text, confidence }) {
   if (isWordlessOrSentinel(text)) return
+  // Drop low-confidence transcriptions: whisper turns noise/cross-talk/echo into
+  // confident-looking gibberish ("Zedadimani and Reesana") that then pollutes the
+  // context so the bot replies to it. A floor keeps that garbage out of history.
+  if (confidence != null && confidence < MIN_CONFIDENCE) {
+    console.log(`[gate] dropped low-conf (${confidence.toFixed(2)}): "${text.slice(0, 50)}"`)
+    return
+  }
   if (isBotEcho(text)) { console.log(`[gate] dropped self-echo: "${text.slice(0, 50)}"`); return }
   state.lastWhisperAt = Date.now()
   state.activeSpeakers.set(userId, { username, lastWordAt: state.lastWhisperAt, lastText: text })
