@@ -73,9 +73,13 @@ function armDebounce() {
 
 const onWhisperAbort = (reason) => () => { abortCurrent(reason); setState('WAITING', 'aborted by whisper'); armDebounce() }
 
-// Protect SPEAKING until the bot has actually produced audio (TTS first chunk
-// can take >1s), capped at SPEAKING_PROTECT_MAX_MS so a stuck TTS still yields.
-const SPEAKING_PROTECT_MAX_MS = Number(process.env.GATE_SPEAKING_PROTECT_MAX_MS || 3000)
+// Protect SPEAKING until the bot has actually produced audio. Aborting during
+// synthesis (before ANY audio) is pure waste -- the bot isn't speaking yet, so
+// there's nothing to "interrupt"; in a busy channel that left the bot never
+// completing a turn (spoken=0). F5 first chunk is ~9s, so the cap must cover the
+// synth; once audio is playing, barge-in interrupts normally. The cap is only a
+// stuck-TTS safety net.
+const SPEAKING_PROTECT_MAX_MS = Number(process.env.GATE_SPEAKING_PROTECT_MAX_MS || 12000)
 const onSpeakingWhisper = () => {
   if (!state._chunksPlayed && Date.now() - state.enteredAt < SPEAKING_PROTECT_MAX_MS) return
   onWhisperAbort('whisper-mid-speak')()
@@ -85,7 +89,11 @@ const transitions = {
   LISTENING: { onWhisperWord: () => { setState('WAITING', 'first whisper word'); armDebounce() } },
   WAITING:   { onWhisperWord: () => armDebounce() },
   GATING:    { onWhisperWord: onWhisperAbort('whisper-mid-gate') },
-  ANSWERING: { onWhisperWord: onWhisperAbort('whisper-mid-answer') },
+  // ANSWERING is committed + pre-audio: the gate already decided YES and the bot
+  // isn't speaking yet, so new words don't abort (they're recorded for the next
+  // turn). Without this, continuous channel chatter aborted every answer and the
+  // bot never spoke. Barge-in resumes once SPEAKING emits audio.
+  ANSWERING: { onWhisperWord: () => {} },
   SPEAKING:  { onWhisperWord: onSpeakingWhisper },
 }
 

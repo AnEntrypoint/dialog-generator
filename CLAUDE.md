@@ -30,13 +30,49 @@ Both server and browser use **Bonsai** (1-bit quantized, onnx-community) for max
 - Server: 128ms warm generation (token output after init), 2.3s `getLlama()` startup
 - Browser: WebGPU-capable device: similar; fallback CPU: ~5–30s per inference
 
-## Server LLM Dispatcher — Remote-first, Lazy Local Fallback
+## Server LLM Dispatcher — Provider Chain, then chatjimmy, then Local
 
-`llm.js` is the server-side dispatch facade. It prefers the **chatjimmy.ai** free public endpoint (via `llm-remote.js`); on failure it lazy-imports `llm-llamacpp.js` so processes that succeed remotely never pay node-llama-cpp's GPU init cost.
+`llm.js` is the server-side dispatch facade. Tiers tried in order:
+1. **Fast provider chain** (`llm-providers.js`) — OpenAI-compatible endpoints
+   (groq/cerebras/sambanova/mistral/codestral/qwen/zai/nvidia/gemini/openrouter/
+   cloudflare/ollama) driven by `PROVIDER_ORDER` in `.env`. Each provider is used
+   only if it has a config here AND a non-empty `*_API_KEY` in the env; unkeyed/
+   unconfigured providers (and the ACP-wrapper entries) are skipped. groq/cerebras
+   are sub-1s -> the fluid path. `generate()` tries each in order, caches the
+   working one, re-probes on failure.
+2. **chatjimmy.ai** free public endpoint (`llm-remote.js`).
+3. **Local llama.cpp** (`llm-llamacpp.js`), lazy-imported so the GPU init cost is
+   paid only when both remote tiers are down.
+
+With an empty `.env` (no keys) the chain reports unavailable and transparently
+uses chatjimmy; adding any `*_API_KEY` auto-activates that provider. **`.env` is
+gitignored** — keys never committed; `llm-providers.js` holds only base URLs,
+model names, and key env-var NAMES.
 
 **Call sites** (all import from `./llm.js`, never the backend modules directly): `speak-gate.js`, `server.js`.
 
-**Backend selection** is cached after first probe. On a remote-call exception (not abort), the dispatcher resets availability, loads local, and retries once. `LLM_FORCE_LOCAL=1` or `LLM_FORCE_REMOTE=1` pin one side.
+**Resilience**: `isAvailable()` (the gate's pre-flight) re-probes and re-picks when
+the cached tier goes down, so a transient remote blip no longer mutes the bot until
+restart. On a call-time failure the dispatcher resets and re-picks the next live
+tier. `LLM_FORCE_LOCAL=1` or `LLM_FORCE_REMOTE=1` pin a side.
+
+## Discord Voice Fluidity
+
+Conversational latency was ~44s/reply; now ~11s. Three levers:
+- **Reference cap** (`f5-tts-bridge.setRefVoice`): F5's transformer processes
+  (ref + gen) frames every NFE step, so a long reference dominates cost. Capping
+  the clip to `F5_REF_SECONDS` (default 5s, was the full 14.6s cleetus) cut a
+  short reply 39s -> ~9s (3.2x). `F5_REF_SECONDS=3` -> ~6s (slight timbre cost).
+- **Turn-commit / barge-in** (`speak-gate.js`): ANSWERING + SPEAKING-before-audio
+  are committed (whisper words don't abort them — the bot isn't audible yet, so
+  there is nothing to interrupt); `GATE_SPEAKING_PROTECT_MAX_MS` raised to 12000
+  to cover the synth. This fixed `spoken=0` in busy channels (the bot kept getting
+  aborted mid-synthesis and never spoke). Barge-in resumes once audio plays.
+- **Sentence streaming** (`splitTextIntoChunks`): one chunk per sentence so a
+  multi-sentence reply emits the first sentence's audio immediately.
+
+F5's flow-matching is the residual ~9s floor; truly-instant (<3s) would need a
+streaming TTS.
 
 ### Remote backend — `llm-remote.js` (chatjimmy.ai)
 

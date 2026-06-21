@@ -45,15 +45,33 @@ function splitSentences(text) {
 function splitTextIntoChunks(text) {
   const trimmed = text.trim()
   if (!trimmed) return []
-  if (trimmed.length <= MAX_CHUNK_CHARS) return [trimmed]
+  // One chunk per sentence so synthesizeStream emits the FIRST sentence's audio
+  // as soon as it's ready (lower perceived latency) instead of synthesizing the
+  // whole reply first. Tiny sentences (< 24 chars) merge forward to avoid the
+  // per-synth overhead dominating. A single over-long sentence is word-split at
+  // MAX_CHUNK_CHARS.
   const chunks = []
   let cur = ''
   for (const s of splitSentences(trimmed)) {
-    if (cur && (cur + ' ' + s).length > MAX_CHUNK_CHARS) { chunks.push(cur); cur = s }
-    else cur = cur ? cur + ' ' + s : s
+    if (cur && (cur.length < 24 || s.length < 24) && (cur + ' ' + s).length <= MAX_CHUNK_CHARS) {
+      cur = cur + ' ' + s; continue
+    }
+    if (cur) chunks.push(cur)
+    cur = s
   }
   if (cur) chunks.push(cur)
-  return chunks
+  // hard-split any chunk still over the cap (single very long sentence)
+  const out = []
+  for (const c of chunks) {
+    if (c.length <= MAX_CHUNK_CHARS) { out.push(c); continue }
+    let w = ''
+    for (const word of c.split(/\s+/)) {
+      if (w && (w + ' ' + word).length > MAX_CHUNK_CHARS) { out.push(w); w = word }
+      else w = w ? w + ' ' + word : word
+    }
+    if (w) out.push(w)
+  }
+  return out
 }
 
 function readWavMono(wavPath) {
@@ -160,11 +178,25 @@ function tensorToFloat32(t) {
 export async function setRefVoice(wavPath, text) {
   await ensureModel()
   const { audio, sampleRate } = readWavMono(wavPath)
-  const mono = resampleMono(audio, sampleRate, SAMPLE_RATE)
+  let mono = resampleMono(audio, sampleRate, SAMPLE_RATE)
+  let txt = (text || '').trim()
+  // Cap the reference clip: F5's transformer processes (ref + gen) frames on
+  // EVERY NFE step, so a long reference dominates latency. The full 14.6s
+  // cleetus ref -> 39s/short-reply; a 5s cap -> ~12s, same NFE32 quality. Trim
+  // the transcript by the same fraction so the duration ratio stays consistent.
+  const capSamples = Math.floor(Number(process.env.F5_REF_SECONDS || 5) * SAMPLE_RATE)
+  if (mono.length > capSamples) {
+    const frac = capSamples / mono.length
+    mono = mono.slice(0, capSamples)
+    if (txt) {
+      const words = txt.split(/\s+/)
+      txt = words.slice(0, Math.max(1, Math.round(words.length * frac))).join(' ')
+    }
+  }
   refAudioTensor = new torchMod.Tensor('float32', mono, [mono.length])
-  refText = (text || '').trim()
+  refText = txt
   refSource = path.basename(wavPath)
-  console.log(`[f5-tts] ref voice set: ${refSource} (${mono.length} samples, refText ${refText.length} chars)`)
+  console.log(`[f5-tts] ref voice set: ${refSource} (${mono.length} samples / ${(mono.length / SAMPLE_RATE).toFixed(1)}s, refText ${refText.length} chars)`)
 }
 
 async function generateChunk(genText, signal) {
