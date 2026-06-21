@@ -4,7 +4,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { encodeWAV, buildAfan } from './server-utils.mjs'
 import { LipsyncSDKNode } from '../a2f/lipsync-sdk-node.mjs'
-import { synthesize as synthesizeTTS, setRefVoice as chatterboxSetRef } from './f5-tts-bridge.js'
+import { synthesize as synthesizeTTS, setRefVoice as setTTSRefVoice } from './f5-tts-bridge.js'
 import { generate as generateLLM, isAvailable as isLLMAvailable } from './llm.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -119,7 +119,9 @@ async function loadVoiceEmbedding() {
     console.warn('[voice] No voice file found at', CLEETUS_WAV)
     return null
   }
-  await chatterboxSetRef(CLEETUS_WAV)
+  const cleetusTxt = CLEETUS_WAV.replace(/\.wav$/, '.txt')
+  const refText = fs.existsSync(cleetusTxt) ? fs.readFileSync(cleetusTxt, 'utf8').trim().slice(0, 300) : ''
+  await setTTSRefVoice(CLEETUS_WAV, refText)
   console.log('[voice] Voice reference loaded:', CLEETUS_WAV)
   voiceEmbedding = CLEETUS_WAV
   return voiceEmbedding
@@ -336,9 +338,11 @@ async function start() {
   // first user utterance is already at warm-streaming latency (~700ms first chunk)
   if (process.env.WARMUP_TTS !== 'false') {
     try {
-      console.log('[server] Warming up Chatterbox TTS (model load + speaker encode)...')
+      console.log('[server] Warming up F5-TTS (model load + reference)...')
       const warmupStart = performance.now()
-      await chatterboxSetRef(CLEETUS_WAV)
+      const cleetusTxt = CLEETUS_WAV.replace(/\.wav$/, '.txt')
+      const refText = fs.existsSync(cleetusTxt) ? fs.readFileSync(cleetusTxt, 'utf8').trim().slice(0, 300) : ''
+      await setTTSRefVoice(CLEETUS_WAV, refText)
       await synthesizeTTS('Server starting', null, null)
       const warmupTime = ((performance.now() - warmupStart) / 1000).toFixed(1)
       console.log(`[server] TTS warmup complete (${warmupTime}s)`)
