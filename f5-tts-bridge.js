@@ -122,6 +122,8 @@ async function ensureModel() {
     const m = new f5.F5TTS({ useFP16, emit: () => {} })
     // fp16 weights need a GPU EP (DirectML on Windows); CPU lacks fp16 kernels.
     // fp32 runs on CPU. F5_EP overrides the provider list explicitly.
+    // fp32 runs fastest on CPU here (DML falls back per-node for fp32 with
+    // transfer overhead -> slower). fp16 needs a GPU EP. F5_EP overrides.
     const eps = process.env.F5_EP
       ? process.env.F5_EP.split(',')
       : useFP16 ? ['dml', 'cpu'] : ['cpu']
