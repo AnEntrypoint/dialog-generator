@@ -183,8 +183,18 @@ runtime; otherwise it defaults to onnxruntime-web.
 
 Replaces `chatterbox-tts-bridge.js`. Injects onnxruntime-node via the ORT global
 symbol, creates the 3 sessions from local files (bypassing the HF hub loader), and
-runs `F5TTS.inference` per text chunk. Auto-selects `transformer_fp32` (CPU-safe) or
-`transformer_fp16` by presence (`F5_FP16=1` forces fp16).
+runs `F5TTS.inference` per text chunk. Uses `transformer_fp32` (the only
+server-usable weight — see below) on the **webgpu EP** by default, with CPU
+fallback.
+
+**GPU / EP**: onnxruntime-node bundles `cpu`, `dml`, and `webgpu` EPs. The fp32
+transformer on `webgpu` runs ~20s for 5.4s of audio vs 131s on CPU (6.6x). The
+bridge defaults the transformer to `['webgpu', 'cpu']` (CPU fallback for GPU-less
+machines); `F5_EP=cpu|dml|webgpu,...` overrides. **fp16 is unusable server-side**:
+onnxruntime-node's native binding rejects the fp16 model's `Float16Array` inputs
+("not enough space: got 0") regardless of EP/version, and `dml` falls back per-node
+for fp32 (268s). The browser path uses fp16 on WebGPU where it works. Encoder and
+decoder (small, fp32) stay on CPU.
 
 ```javascript
 import { setRefVoice, synthesize, synthesizeStream } from './f5-tts-bridge.js'
@@ -204,7 +214,7 @@ await synthesizeStream(text, _unused, _unused, (chunk, sr) => { /* play */ }, si
 - `GET /debug/tts` -> `{ modelLoaded, speakerEncoded, speakerSource, loading }`.
 
 Env: `F5_MODEL_DIR`, `F5_NFE_STEPS` (default 16), `F5_SPEED` (1.0), `F5_CHUNK_CHARS`
-(200), `F5_FP16`.
+(200), `F5_FP16`, `F5_EP` (comma list, default `webgpu,cpu`).
 
 ### Browser Demo
 
