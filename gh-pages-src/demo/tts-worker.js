@@ -6,8 +6,8 @@ import { F5TTS, Tensor } from './f5-core.bundle.js'
 
 const SAMPLE_RATE = 24000
 const REPO = 'nsarang/F5-TTS-ONNX'
-const NFE_STEPS = 16
-const SPEED = 1.0
+const NFE_STEPS = 32  // nsarang's default; 16 left audible high-freq hiss
+const SPEED = 0.8     // less rushed/garbled than 1.0
 
 let model = null
 let aborted = false

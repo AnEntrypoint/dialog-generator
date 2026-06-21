@@ -213,8 +213,15 @@ await synthesizeStream(text, _unused, _unused, (chunk, sr) => { /* play */ }, si
   `getDebugState`. Callers (`speak-gate.js`, `server.js`) only change the import path.
 - `GET /debug/tts` -> `{ modelLoaded, speakerEncoded, speakerSource, loading }`.
 
-Env: `F5_MODEL_DIR`, `F5_NFE_STEPS` (default 16), `F5_SPEED` (1.0), `F5_CHUNK_CHARS`
+Env: `F5_MODEL_DIR`, `F5_NFE_STEPS` (default 32), `F5_SPEED` (0.8), `F5_CHUNK_CHARS`
 (200), `F5_FP16`, `F5_EP` (comma list, default `webgpu,cpu`).
+
+**Audio quality**: NFE steps (flow-matching denoising iterations) gate the output
+quality. NFE=16 left audible high-frequency hiss (HF-energy ratio ~0.39 vs the
+clean reference's 0.025); NFE=32 (nsarang's default) drops it to ~0.05 (near-clean).
+speed 0.8 (vs 1.0) is less rushed. The cost is latency (~1.2s/NFE-step on the webgpu
+EP, so ~37s for a ~7s clip); lower `F5_NFE_STEPS` to trade quality for speed. The
+browser worker (`tts-worker.js`) uses the same 32/0.8.
 
 ### Browser Demo
 

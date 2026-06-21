@@ -54,7 +54,10 @@ const supportedDevices = [];
 /** @type {ONNXExecutionProviders[]} */
 let defaultDevices;
 let ONNX;
-const ORT_SYMBOL = Symbol.for("onnxruntime");
+// PRIVATE symbol (not the shared "onnxruntime"): setting the shared one hijacks
+// @huggingface/transformers (whisper) too, leaving ITS supportedDevices empty
+// ("Unsupported device: cpu. Should be one of: ."). Keep f5's runtime isolated.
+const ORT_SYMBOL = Symbol.for("f5tts-onnxruntime");
 
 if (ORT_SYMBOL in globalThis) {
   // If the JS runtime exposes their own ONNX runtime, use it

@@ -235,6 +235,19 @@ app.post('/api/discord/voice/say', async (req, res) => {
   }
 })
 
+app.post('/api/discord/test/utterance', async (req, res) => {
+  try {
+    const { userId = 'test-user', username = 'tester', text } = req.body
+    if (!text) return res.status(400).json({ error: 'text required' })
+    const sg = await import('./speak-gate.js')
+    sg.noteWhisperWord({ userId, username, text })
+    res.json({ success: true, state: sg.getDebugSnapshot().state })
+  } catch (err) {
+    console.error('[api] test utterance error:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.post('/api/discord/message', async (req, res) => {
   if (!sendMessage) return res.status(503).json({ error: 'Discord not enabled' })
   try {

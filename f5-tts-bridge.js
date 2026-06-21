@@ -16,8 +16,12 @@ import path from 'path'
 
 const SAMPLE_RATE = 24000
 const MODEL_DIR = process.env.F5_MODEL_DIR || path.resolve('models/tts/f5')
-const NFE_STEPS = Number(process.env.F5_NFE_STEPS || 16)
-const SPEED = Number(process.env.F5_SPEED || 1.0)
+// nsarang's quality defaults. NFE=16 left strong high-frequency noise (hiss):
+// HF-energy ratio ~0.39 vs the clean reference's 0.025; NFE=32 drops it to ~0.05
+// (near-clean). speed 0.8 (vs 1.0) is less rushed/garbled. Lower F5_NFE_STEPS
+// trades quality for latency (~1.2s/step on the webgpu EP).
+const NFE_STEPS = Number(process.env.F5_NFE_STEPS || 32)
+const SPEED = Number(process.env.F5_SPEED || 0.8)
 const MAX_CHUNK_CHARS = Number(process.env.F5_CHUNK_CHARS || 200)
 
 const ABBREVIATIONS = new Set([
@@ -103,11 +107,12 @@ async function ensureModel() {
   if (model) return
   if (loadPromise) return loadPromise
   loadPromise = (async () => {
-    // Inject onnxruntime-node BEFORE importing f5-core (its onnx.js reads the
-    // ORT global symbol at module-load time).
+    // Inject onnxruntime-node via f5-core's PRIVATE symbol (not the shared
+    // "onnxruntime") so we don't break @huggingface/transformers/whisper's own
+    // ORT device detection in the same process.
     const ortNode = await import('onnxruntime-node')
     const ort = ortNode.default ?? ortNode
-    globalThis[Symbol.for('onnxruntime')] = ort
+    globalThis[Symbol.for('f5tts-onnxruntime')] = ort
 
     const f5 = await import('./f5-core/f5-tts.js')
     torchMod = await import('./f5-core/tjs/utils/torch.js')
