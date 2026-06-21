@@ -6,8 +6,9 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url))
 
 const REQUIRED = {
   tts: {
-    dir: path.join(__dirname, 'models', 'tts'),
-    files: ['flow_lm_flow_int8.onnx', 'flow_lm_main_int8.onnx', 'mimi_decoder_int8.onnx', 'mimi_encoder.onnx', 'text_conditioner.onnx', 'tokenizer.model'],
+    dir: path.join(__dirname, 'models', 'tts', 'f5'),
+    files: ['onnx/encoder_fp32.onnx', 'onnx/decoder_fp32.onnx', 'onnx/transformer_fp32.onnx', 'vocab.txt'],
+    hint: 'Run: node tools/download-f5-models.mjs (fetches nsarang/F5-TTS-ONNX, ~1.4GB)',
   },
   llm: {
     dir: path.join(__dirname, 'models', 'llm'),
@@ -44,7 +45,7 @@ export async function downloadModels() {
     } else {
       for (const f of cfg.files) {
         const p = path.join(cfg.dir, f)
-        if (!fs.existsSync(p)) { console.log(`[${name}] ✗ missing ${f}`); missing++ }
+        if (!fs.existsSync(p)) { console.log(`[${name}] ✗ missing ${f}${cfg.hint ? ` -- ${cfg.hint}` : ''}`); missing++ }
         else if (isLfsPointer(p)) { console.log(`[${name}] ✗ ${f} is LFS pointer; run: git lfs pull`); missing++ }
         else console.log(`[${name}] ✓ ${f} (${(fs.statSync(p).size/1e6).toFixed(1)} MB)`)
       }
