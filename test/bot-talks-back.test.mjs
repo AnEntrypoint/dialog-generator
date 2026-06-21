@@ -1,10 +1,10 @@
 // End-to-end validation that the bot actually talks back: real chatjimmy LLM
-// call + mocked TTS (chatterbox load is too slow for CI). Asserts the audio
+// call + mocked TTS (f5 load is too slow for CI). Asserts the audio
 // sink receives at least one resampled chunk and the bot turn lands in history.
 
 import { describe, it, expect, vi } from 'vitest'
 
-vi.mock('../chatterbox-tts-bridge.js', () => ({
+vi.mock('../f5-tts-bridge.js', () => ({
   synthesizeStream: vi.fn(async (text, refPath, refText, onChunk, signal) => {
     // Simulate a TTS that takes ~200ms to start, then emits 3 chunks
     await new Promise(r => setTimeout(r, 200))
