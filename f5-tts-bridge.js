@@ -16,13 +16,27 @@ import path from 'path'
 
 const SAMPLE_RATE = 24000
 const MODEL_DIR = process.env.F5_MODEL_DIR || path.resolve('models/tts/f5')
-// nsarang's quality defaults. NFE=16 left strong high-frequency noise (hiss):
-// HF-energy ratio ~0.39 vs the clean reference's 0.025; NFE=32 drops it to ~0.05
-// (near-clean). speed 0.8 (vs 1.0) is less rushed/garbled. Lower F5_NFE_STEPS
-// trades quality for latency (~1.2s/step on the webgpu EP).
-const NFE_STEPS = Number(process.env.F5_NFE_STEPS || 32)
-const SPEED = Number(process.env.F5_SPEED || 0.8)
+// NFE is the speed<->quality dial and is RUNTIME-tunable (setSynthConfig / the
+// /api/tts/config endpoint) so it can be dialed by ear without a restart. The
+// entire synth cost is the NFE loop over (ref + gen) frames (~0.4s/step on the
+// webgpu EP); the fixed encoder+decoder cost is only ~0.25s. Measured for 6.1s
+// of audio at the 5s ref cap: NFE=8 -> 5.3s synth (RTF 0.88, hiss HF~0.75),
+// NFE=16 -> 11s (RTF 1.85, HF~0.36), NFE=32 -> 23s (RTF 3.8, clean HF~0.08).
+// Default is NFE=32 (clean): NFE=16 sounds scrambly/under-denoised. There is no
+// fast+clean point with F5 -- raise NFE for quality, lower for speed (hissier).
+let NFE_STEPS = Number(process.env.F5_NFE_STEPS || 32)
+let SPEED = Number(process.env.F5_SPEED || 0.8)
+let REF_SECONDS = Number(process.env.F5_REF_SECONDS || 5)
 const MAX_CHUNK_CHARS = Number(process.env.F5_CHUNK_CHARS || 200)
+
+export function getSynthConfig() { return { nfeSteps: NFE_STEPS, speed: SPEED, refSeconds: REF_SECONDS } }
+export function setSynthConfig({ nfeSteps, speed, refSeconds } = {}) {
+  if (Number.isFinite(nfeSteps) && nfeSteps > 0) NFE_STEPS = Math.round(nfeSteps)
+  if (Number.isFinite(speed) && speed > 0) SPEED = speed
+  if (Number.isFinite(refSeconds) && refSeconds > 0) { REF_SECONDS = refSeconds; applyRefCap() }
+  console.log(`[f5-tts] synth config: nfe=${NFE_STEPS} speed=${SPEED} ref=${REF_SECONDS}s`)
+  return getSynthConfig()
+}
 
 const ABBREVIATIONS = new Set([
   'mr', 'mrs', 'ms', 'dr', 'prof', 'sr', 'jr', 'st', 'vs', 'etc', 'inc', 'ltd', 'co',
@@ -175,28 +189,34 @@ function tensorToFloat32(t) {
   return d instanceof Float32Array ? d : Float32Array.from(d)
 }
 
-export async function setRefVoice(wavPath, text) {
-  await ensureModel()
-  const { audio, sampleRate } = readWavMono(wavPath)
-  let mono = resampleMono(audio, sampleRate, SAMPLE_RATE)
-  let txt = (text || '').trim()
-  // Cap the reference clip: F5's transformer processes (ref + gen) frames on
-  // EVERY NFE step, so a long reference dominates latency. The full 14.6s
-  // cleetus ref -> 39s/short-reply; a 5s cap -> ~12s, same NFE32 quality. Trim
-  // the transcript by the same fraction so the duration ratio stays consistent.
-  const capSamples = Math.floor(Number(process.env.F5_REF_SECONDS || 5) * SAMPLE_RATE)
+let _fullRefMono = null, _fullRefText = ''
+
+// Cap the reference clip to REF_SECONDS: F5's transformer processes (ref + gen)
+// frames on EVERY NFE step, so a long reference dominates latency (full 14.6s
+// cleetus -> 39s/short-reply; 5s -> ~12s). Trim the transcript by the same
+// fraction so the duration ratio stays consistent. Re-runnable when REF_SECONDS
+// changes via setSynthConfig.
+function applyRefCap() {
+  if (!_fullRefMono) return
+  let mono = _fullRefMono, txt = _fullRefText
+  const capSamples = Math.floor(REF_SECONDS * SAMPLE_RATE)
   if (mono.length > capSamples) {
     const frac = capSamples / mono.length
     mono = mono.slice(0, capSamples)
-    if (txt) {
-      const words = txt.split(/\s+/)
-      txt = words.slice(0, Math.max(1, Math.round(words.length * frac))).join(' ')
-    }
+    if (txt) { const w = txt.split(/\s+/); txt = w.slice(0, Math.max(1, Math.round(w.length * frac))).join(' ') }
   }
   refAudioTensor = new torchMod.Tensor('float32', mono, [mono.length])
   refText = txt
-  refSource = path.basename(wavPath)
   console.log(`[f5-tts] ref voice set: ${refSource} (${mono.length} samples / ${(mono.length / SAMPLE_RATE).toFixed(1)}s, refText ${refText.length} chars)`)
+}
+
+export async function setRefVoice(wavPath, text) {
+  await ensureModel()
+  const { audio, sampleRate } = readWavMono(wavPath)
+  _fullRefMono = resampleMono(audio, sampleRate, SAMPLE_RATE)
+  _fullRefText = (text || '').trim()
+  refSource = path.basename(wavPath)
+  applyRefCap()
 }
 
 async function generateChunk(genText, signal) {
@@ -245,5 +265,6 @@ export function getDebugState() {
     speakerEncoded: Boolean(refAudioTensor),
     speakerSource: refSource,
     loading: Boolean(loadPromise && !model),
+    config: getSynthConfig(),
   }
 }

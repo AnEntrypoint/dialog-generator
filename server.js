@@ -221,6 +221,17 @@ app.post('/api/discord/voice/disconnect', (req, res) => {
   }
 })
 
+// Live TTS speed/quality dial (no restart): POST {nfeSteps, speed, refSeconds}.
+// nfeSteps is the main lever - lower = faster + hissier, higher = slower + cleaner.
+app.post('/api/tts/config', async (req, res) => {
+  try {
+    const { setSynthConfig } = await import('./f5-tts-bridge.js')
+    res.json(setSynthConfig(req.body || {}))
+  } catch (err) {
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.post('/api/discord/voice/say', async (req, res) => {
   try {
     const { text } = req.body
