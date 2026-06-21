@@ -21,8 +21,12 @@
     "discord.js": "^14.14.1",
     "dispipe": "^1.0.2",
     "express": "^5.2.1",
+    "js-logger": "^1.6.1",
     "node-llama-cpp": "^3.18.1",
+    "onnxruntime-common": "^1.27.0",
     "onnxruntime-node": "^1.27.0",
+    "onnxruntime-web": "^1.27.0",
+    "phonemizer": "^1.2.1",
     "prism-media": "^1.3.5",
     "three": "^0.182.0"
   },
