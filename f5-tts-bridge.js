@@ -119,7 +119,7 @@ async function ensureModel() {
     const useFP16 = process.env.F5_FP16 === '1' || !fs.existsSync(fp32Path)
     const transformerPath = useFP16 ? fp16Path : fp32Path
 
-    const m = new f5.F5TTS({ useFP16 })
+    const m = new f5.F5TTS({ useFP16, emit: () => {} })
     // fp16 weights need a GPU EP (DirectML on Windows); CPU lacks fp16 kernels.
     // fp32 runs on CPU. F5_EP overrides the provider list explicitly.
     const eps = process.env.F5_EP
