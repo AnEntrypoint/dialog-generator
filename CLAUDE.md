@@ -142,75 +142,81 @@ Alternative models available: `Xenova/whisper-small` (74MB), `Xenova/whisper-bas
 
 - **HTML-poisoned cache**: GitHub Pages 404 responses are HTML (`<!DOCTYPE html>`) and can be large enough to pass a byte-size check. The cache bust must also check the first byte: `new Uint8Array(buf.slice(0,1))[0] === 0x3C` means HTML, delete it.
 
-## TTS — Chatterbox Turbo (ResembleAI, ONNX via @huggingface/transformers)
+## TTS — F5-TTS (nsarang, ONNX both sides)
 
-Both server-side and browser demo now use **Chatterbox Turbo** (ResembleAI) for text-to-speech. Chatterbox is ONNX-based, eliminating the subprocess overhead of previous Python bridges.
+Server and browser use **F5-TTS** (Flow Matching with a Diffusion Transformer) via
+ONNX, ported from [nsarang/voice-cloning-f5-tts](https://github.com/nsarang/voice-cloning-f5-tts)
+(the browser app at https://nimasarang.com/project/2025-09-28-tts/). Zero-shot voice
+cloning from a short reference clip, no Python subprocess, no separate vocoder.
 
-### Node.js / Discord Voice
+(History: a brief LuxTTS detour happened earlier from a faulty fetch returning the
+wrong model; F5-TTS is the intended target. The LuxTTS vocoder-ONNX-export work was
+removed in the pivot.)
 
-**Implementation**: `chatterbox-tts-bridge.js` module using `@huggingface/transformers` v4 (NOT v2 — v2 lacks ChatterboxModel).
+### Models — `nsarang/F5-TTS-ONNX` (HuggingFace)
 
-**Speaker Pre-Encoding**:
-Before any synthesis call, encode a reference voice once via `setRefVoice(wavPath)`:
+Three **self-contained** ONNX models (mel extraction + flow matching + vocoder all
+baked in) under `models/tts/f5/onnx/`:
+- `encoder_fp32.onnx` (~66 MB) — in `[audio, text_ids, max_duration]`, out 8 tensors
+  (`noise`, RoPE cos/sin q+k, `cat_mel_text`, `cat_mel_text_drop`, `ref_signal_len`)
+- `transformer_fp16.onnx` (~661 MB) / `transformer_fp32.onnx` (~1.3 GB) — the NFE
+  denoising step: in `[noise, ropeCos/Sin q+k, catMelText, catMelTextDrop, timeStep]`,
+  out `[noise, timeStep]`
+- `decoder_fp32.onnx` (~60 MB) — in `[denoised, ref_signal_len]`, out `[output_audio]`
+- `vocab.txt` (2545 lines) — char/pinyin vocabulary
+
+**Tokenizer**: trivial char-level — `text.split('')` mapped to vocab line-index
+(blank lines skipped), `vocabMap[char] || 0`. No espeak/phonemization. The `a1`/`ang1`/
+`ch0` vocab entries are Chinese pinyin, unused for English.
+
+### Vendored core — `f5-core/`
+
+nsarang's `src/core` vendored verbatim (`f5-tts.js` 3-stage pipeline + `tjs/` Tensor
+library + `audio.js`). Node adaptations: extensionless ESM imports given `.js`
+extensions; `../logging` repointed; the browser-only `import * as ort from
+"onnxruntime-web"` swapped for `{ Tensor } from "onnxruntime-common"` (works in both
+runtimes). The runtime seam is `globalThis[Symbol.for('onnxruntime')]` — set it to
+onnxruntime-node before importing `f5-core` and its `tjs/backends/onnx.js` uses that
+runtime; otherwise it defaults to onnxruntime-web.
+
+### Node.js / Discord Voice — `f5-tts-bridge.js`
+
+Replaces `chatterbox-tts-bridge.js`. Injects onnxruntime-node via the ORT global
+symbol, creates the 3 sessions from local files (bypassing the HF hub loader), and
+runs `F5TTS.inference` per text chunk. Auto-selects `transformer_fp32` (CPU-safe) or
+`transformer_fp16` by presence (`F5_FP16=1` forces fp16).
+
 ```javascript
-import { setRefVoice, synthesize, synthesizeStream } from './chatterbox-tts-bridge.js'
-
-await setRefVoice('/path/to/voices/cleetus.wav')
-const { audio, sampleRate } = await synthesize('hello world', _refPath, _refText, signal)
-```
-
-- `setRefVoice(wavPath)` decodes WAV → monoFloat32Array, calls `model.encode_speech(Tensor('float32', monoFloat32, [1, samples.length]))`, caches embedding
-- `_refPath` and `_refText` parameters ignored (speaker pre-encoded via `setRefVoice`)
-- Output: `{ audio: Float32Array, sampleRate: 24000 }`
-- Streaming via `synthesizeStream(text, _refPath, _refText, onChunk?, signal?)`
-
-**API Contract** (backward-compatible with old Qwen3 bridge):
-```javascript
-const { audio, sampleRate } = await synthesize(text, _unused, _unused, signal)
+import { setRefVoice, synthesize, synthesizeStream } from './f5-tts-bridge.js'
+await setRefVoice('/path/to/voices/cleetus.wav', refTextTranscript)
+const { audio, sampleRate } = await synthesize(text, _unused, _unused, signal) // 24000 Hz
 await synthesizeStream(text, _unused, _unused, (chunk, sr) => { /* play */ }, signal)
 ```
 
-**Integration Points**:
-- **Discord voice pipeline** (`speak-gate.js` SPEAKING stage): pipes LLM output through `synthesizeStream`, upmixes mono→stereo, pushes via `pushAudioFrame`
-- **Web demo API** (`/api/generate` in `server.js`): one-shot `synthesize` for facial animation flow
+- **Reference is loaded at runtime, not pre-encoded** — F5-TTS feeds raw ref audio +
+  ref text + gen text to the encoder each call (the encoder does mel internally). No
+  `.embedding.bin` sidecars. `setRefVoice(wav, text)` decodes WAV -> mono Float32 @24k
+  -> tjs Tensor; ref text is the transcript (`voices/cleetus.txt`).
+- Output `{ audio: Float32Array, sampleRate: 24000 }` — same rate as the old Chatterbox
+  bridge, so the 24k->48k upmix at the Discord sink (`speak-gate.js`) is unchanged.
+- API contract preserved: `setRefVoice` / `synthesize` / `synthesizeStream` /
+  `getDebugState`. Callers (`speak-gate.js`, `server.js`) only change the import path.
+- `GET /debug/tts` -> `{ modelLoaded, speakerEncoded, speakerSource, loading }`.
 
-**Observability**: `GET /debug/tts` returns `{ modelLoaded, speakerEncoded, speakerSource, loading }`. `speakerSource` is `'cache'` (loaded from .embedding.bin) or `'fresh-encode'` (ran encode_speech).
-
-### Pre-Encoded Speaker Embeddings
-
-The `speech_encoder` submodel is the most expensive runtime step for new voices (~5-15s per WAV). We avoid it at runtime by pre-computing speaker tensors offline and committing them next to the WAV.
-
-**Encoder**: `tools/encode-speakers.mjs`. Iterates `voices/*.wav`, runs `model.encode_speech()`, serializes the 4-tensor output (`audio_features` float32, `audio_tokens` int64, `speaker_embeddings` float32, `speaker_features` float32) into:
-- `voices/<name>.embedding.bin` — concatenated raw bytes
-- `voices/<name>.embedding.json` — manifest `{ tensors: { <key>: { dtype, dims, byteOffset, byteLength } } }`
-
-Idempotent on mtime: skips if `.bin` is newer than `.wav`.
-
-**CI**: `.github/workflows/encode-voices.yml` runs the encoder when `voices/*.wav` or `tools/encode-speakers.mjs` changes; commits results back to main. Workflow installs only `@huggingface/transformers` into an isolated `.ci-encoder/` dir to avoid the `file:../dispipe` sibling dep that breaks `bun install --frozen-lockfile` on CI.
-
-**Server-side bridge** (`chatterbox-tts-bridge.js`): `setRefVoice(wavPath)` first looks for `<name>.embedding.bin` + `.embedding.json` next to the WAV. If present and bin mtime ≥ wav mtime, deserialize tensors directly into `speakerEmbeddings` — full `speech_encoder` execution skipped. Else fall back to live encode and write cache for next time.
+Env: `F5_MODEL_DIR`, `F5_NFE_STEPS` (default 16), `F5_SPEED` (1.0), `F5_CHUNK_CHARS`
+(200), `F5_FP16`.
 
 ### Browser Demo
 
-**Implementation**: `gh-pages-src/demo/tts-worker.js` calls `@huggingface/transformers` v4 directly (loaded from jsDelivr). No streamtts dependency.
+`gh-pages-src/demo/tts-worker.js` runs the same `f5-core` over onnxruntime-web
+(WebGPU with WASM fallback; fp16 transformer on WebGPU, fp32 otherwise). Models load
+directly from the HF repo (`nsarang/F5-TTS-ONNX`, cached by the browser) — no part-file
+splitting needed. The worker fetches `./voices/<name>.wav` + `.txt` and passes them to
+`F5TTS.inference` at runtime. Sample rate 24000 Hz, Float32 output.
 
-**Speaker loading** (browser-side): no longer calls `encode_speech` at runtime. Worker fetches `./voices/<name>.embedding.bin` + `./voices/<name>.embedding.json` from gh-pages, deserializes the 4 tensors per the manifest, and passes them as `audio_features` / `audio_tokens` / `speaker_embeddings` / `speaker_features` directly to `model.generate()`. `pages.yml` copies the embedding files alongside WAVs into the deploy.
-
-```javascript
-const buf = new Uint8Array(await (await fetch(`./voices/${name}.embedding.bin`)).arrayBuffer())
-const manifest = await (await fetch(`./voices/${name}.embedding.json`)).json()
-const tensors = {}
-for (const [key, meta] of Object.entries(manifest.tensors)) {
-  const Ctor = meta.dtype === 'float32' ? Float32Array : BigInt64Array
-  const slice = buf.buffer.slice(buf.byteOffset + meta.byteOffset, buf.byteOffset + meta.byteOffset + meta.byteLength)
-  tensors[key] = new Tensor(meta.dtype, new Ctor(slice), meta.dims)
-}
-// later: await model.generate({ ...inputs, ...tensors, exaggeration: 0.5, max_new_tokens: 256 })
-```
-
-**Sample Rate**: 24000 Hz (Chatterbox native). Output Float32Array.
-
-**Why Chatterbox**: ONNX (no subprocess), ~350M params (Turbo variant), lightweight inference via transformers.js, browser-native (no Python runtime needed). Among TTS models supported by transformers.js v4, Chatterbox is the only one with zero-shot WAV-based voice cloning — all alternatives (SpeechT5, Kokoro, Supertonic, StyleTTS2) require pre-fit speaker embeddings, no zero-shot WAV input.
+**Vocoder/vocab note**: unlike Chatterbox there is no separate vocoder model and no
+speaker pre-encode step — the decoder ONNX is the vocoder, and voice cloning is
+zero-shot from the raw reference clip.
 
 ## node-llama-cpp — GPU Detection & Invocation Pitfall
 
@@ -355,7 +361,7 @@ SPEAKING  ─[done]→         history(full), → LISTENING
 
 **Two-stage LLM**:
 1. **GATING** — single grammar-constrained call returning `YES` or `NO`. Grammar `root ::= "YES" | "NO"` built via `buildGrammar()` from `llm-llamacpp.js` (must use the same `getLlama()` instance that loaded the model — `LlamaGrammar` instance must match the session's instance, otherwise `node-llama-cpp` throws). The gating prompt asks: should the bot speak now?
-2. **ANSWERING** — full LLM call only fired when GATING returned YES, then piped into `synthesizeStream` from `chatterbox-tts-bridge.js`.
+2. **ANSWERING** — full LLM call only fired when GATING returned YES, then piped into `synthesizeStream` from `f5-tts-bridge.js`.
 
 **Per-stage AbortController + timeouts** (env-tunable): `GATE_TIMEOUT_GATING_MS=5000`, `GATE_TIMEOUT_ANSWER_MS=15000`, `GATE_TIMEOUT_SPEAKING_MS=30000`. A whisper word arriving during any post-LISTENING stage aborts the in-flight stage and snaps to WAITING.
 
