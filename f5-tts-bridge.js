@@ -112,21 +112,22 @@ async function ensureModel() {
     const f5 = await import('./f5-core/f5-tts.js')
     torchMod = await import('./f5-core/tjs/utils/torch.js')
 
-    // Prefer fp32 transformer on CPU (onnxruntime-node); fall back to fp16 if
-    // that is the only weight present. F5_FP16=1 forces fp16.
+    // Always use the fp32 transformer: onnxruntime-node's native binding cannot
+    // consume the fp16 model's Float16Array inputs (errors "got 0"), so fp16 is
+    // unusable server-side regardless of EP. fp32 needs no conversion.
     const fp32Path = path.join(MODEL_DIR, 'onnx/transformer_fp32.onnx')
     const fp16Path = path.join(MODEL_DIR, 'onnx/transformer_fp16.onnx')
+    // F5_FP16=1 still allowed for experimentation, but fp32 is the supported path.
     const useFP16 = process.env.F5_FP16 === '1' || !fs.existsSync(fp32Path)
     const transformerPath = useFP16 ? fp16Path : fp32Path
 
     const m = new f5.F5TTS({ useFP16, emit: () => {} })
-    // fp16 weights need a GPU EP (DirectML on Windows); CPU lacks fp16 kernels.
-    // fp32 runs on CPU. F5_EP overrides the provider list explicitly.
-    // fp32 runs fastest on CPU here (DML falls back per-node for fp32 with
-    // transfer overhead -> slower). fp16 needs a GPU EP. F5_EP overrides.
+    // GPU acceleration via the webgpu EP (5x faster: 25s vs 131s CPU on the NFE
+    // loop; dml falls back per-node for fp32 and is slower). webgpu -> cpu so a
+    // machine without a GPU still works. F5_EP overrides the provider list.
     const eps = process.env.F5_EP
       ? process.env.F5_EP.split(',')
-      : useFP16 ? ['dml', 'cpu'] : ['cpu']
+      : ['webgpu', 'cpu']
     const opts = { executionProviders: eps, graphOptimizationLevel: 'all' }
     const cpuOpts = { executionProviders: ['cpu'], graphOptimizationLevel: 'all' }
     // encoder/decoder are fp32 -> CPU; only the transformer follows `eps`.
