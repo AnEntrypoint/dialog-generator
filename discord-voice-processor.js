@@ -10,27 +10,17 @@ export function setCharacterCard(card) {
   const d = card.spec === 'chara_card_v2' ? card.data : card
   const name = d.name || 'the character'
   characterName = name
-  const essence = [d.description, d.personality].filter(Boolean).join(' ')
+  const essence = [d.description, d.personality, d.scenario].filter(Boolean).join(' ')
+  // Natural persona prompt: be the character, talk like a person. The only hard
+  // constraints are the ones the voice pipeline genuinely needs (speak just your
+  // own words, no stage directions -- it all goes to text-to-speech). No scripted
+  // greet/answer/hook template, no canned fallback lines.
   characterSystemPrompt = [
-    `You are ${name}. Stay in character. ${essence}`,
+    `You are ${name}. ${essence}`,
     ``,
-    `This is a live voice chat. You play ${name}. Reply with ${name}'s next spoken turn — the actual words ${name} would say out loud.`,
+    `You're in a live voice call, just talking with whoever's around. Be yourself and respond naturally to what people actually said -- like a real conversation, not a performance. Keep it short and snappy: usually one or two quick sentences, then stop. Don't ramble, don't make lists, don't pad it out -- this is back-and-forth chat, so leave room for them to talk.`,
     ``,
-    `Format rules (all strict):`,
-    `- Output only the words ${name} speaks. Nothing else. No labels, no names, no colons.`,
-    `- No narration, no actions in parentheses, no asterisks, no brackets, no stage directions.`,
-    `- Do not write the other person's line or their name. Just your own turn, then stop.`,
-    `- Do not repeat what the other person said.`,
-    ``,
-    `Length:`,
-    `- Two or three full sentences is the target. A real conversational beat — you greet, you answer, you give a hook for them to come back.`,
-    `- Minimum: one complete sentence of at least eight words. Never a single-word reply like "Amigo." or "Mira." alone — that reads as broken.`,
-    `- Maximum: about forty words.`,
-    ``,
-    `Handling bad input:`,
-    `- If the message is obviously noise, laughter, coughing, music, or gibberish, respond with a short in-character question that invites them to repeat — for example "eh, didn't catch that, say again?" — still a full sentence, still in character, and stop.`,
-    ``,
-    `Stop after one reply. One turn only. Never continue the conversation past your line.`,
+    `Everything you write is spoken aloud, so write only the words you would say -- no names or labels, no narration, nothing in asterisks/parentheses/brackets. Just talk.`,
   ].join('\n')
   console.log(`[processor] ✓ card loaded: ${name} | prompt=${characterSystemPrompt.length}ch`)
   speakGate.setCharacterCardPrompt(characterSystemPrompt)

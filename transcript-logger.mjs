@@ -21,15 +21,27 @@ function ensureStream() {
   return stream
 }
 
-// entry: { role: 'user'|'bot', username, text, ts }
-export function appendTurn({ role, username, text, ts }) {
+// entry: { role: 'user'|'bot', username, text, ts, meta }
+// meta (bot turns): { gate, gateMs, answerMs, firstAudioMs, sinceHeardMs, aborted }
+export function appendTurn({ role, username, text, ts, meta }) {
   const t = (text || '').trim()
   if (!t) return
   const s = ensureStream()
   if (!s) return
   const iso = new Date(ts || Date.now()).toISOString()
   const who = role === 'bot' ? `${process.env.BOT_NAME || 'Cleetus'} (bot)` : (username || 'user')
-  s.write(`[${iso}] ${who}: ${t}\n`)
+  let timing = ''
+  if (meta) {
+    const parts = []
+    if (meta.replyMs != null) parts.push(`reply=${meta.replyMs}ms`)   // heard -> first sound (the real lag)
+    if (meta.gate) parts.push(`gate=${meta.gate}${meta.gateMs != null ? `/${meta.gateMs}ms` : ''}`)
+    if (meta.answerMs != null) parts.push(`llm=${meta.answerMs}ms`)
+    if (meta.firstAudioMs != null) parts.push(`synth=${meta.firstAudioMs}ms`)
+    if (meta.spokeForMs != null) parts.push(`spoke=${meta.spokeForMs}ms`)
+    if (meta.aborted) parts.push('aborted')
+    if (parts.length) timing = `   {${parts.join(' ')}}`
+  }
+  s.write(`[${iso}] ${who}: ${t}${timing}\n`)
 }
 
 export function transcriptPath() { return LOG_PATH }

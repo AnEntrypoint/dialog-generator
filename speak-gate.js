@@ -7,7 +7,11 @@ import { resampleAudio } from './server-utils.mjs'
 
 const SAMPLE_RATE_DISCORD = 48000
 const SAMPLE_RATE_TTS_FALLBACK = 24000
-const DEBOUNCE_MS = Number(process.env.GATE_DEBOUNCE_MS || 600)
+// Silence after the last word before the bot decides to reply. 600ms fired on
+// natural mid-thought pauses -> the gate answered a half-sentence, then the
+// continuation triggered a SECOND reply (the double-reply). 1100ms lets a normal
+// pause ride through so one utterance = one reply.
+const DEBOUNCE_MS = Number(process.env.GATE_DEBOUNCE_MS || 1100)
 // Skip the LLM gate call for messages that are clearly worth a reply — saves
 // ~1s round-trip per turn. The gate prompt says "YES by default" anyway.
 const GATE_LLM_THRESHOLD_CHARS = Number(process.env.GATE_LLM_THRESHOLD_CHARS || 8)
@@ -19,7 +23,7 @@ const STAGE_TIMEOUT = {
 const MAX_RESPONSE_CHARS = Number(process.env.GATE_MAX_RESPONSE_CHARS || 600)
 // Token budget for the spoken reply. 50 cut responses off mid-sentence; allow a
 // normal sentence-or-two reply. TTS streams per sentence so length != huge delay.
-const ANSWER_MAX_TOKENS = Number(process.env.GATE_ANSWER_MAX_TOKENS || 200)
+const ANSWER_MAX_TOKENS = Number(process.env.GATE_ANSWER_MAX_TOKENS || 110)
 const MAX_HISTORY = 12
 
 const GATE_PROMPT = [
@@ -63,12 +67,12 @@ function abortCurrent(reason) {
 function logTurn(h) {
   if (!h || h._logged) return
   h._logged = true
-  try { appendTranscript({ role: h.role, username: h.username, text: h.text, ts: h.timestamp }) } catch {}
+  try { appendTranscript({ role: h.role, username: h.username, text: h.text, ts: h.timestamp, meta: h._meta }) } catch {}
 }
 
-function snapHistory(role, text, username = null) {
+function snapHistory(role, text, username = null, meta = null) {
   if (!text) return
-  const entry = { role, username, text, timestamp: Date.now() }
+  const entry = { role, username, text, timestamp: Date.now(), _meta: meta }
   state.history.push(entry)
   if (role === 'bot') logTurn(entry)                       // bot turns are final on write
   // earlier turns are now superseded (final). The last entry may still be a
@@ -149,6 +153,7 @@ const stageHandlers = {
 
     const last = state.history[state.history.length - 1]
     if (!last || last.role !== 'user') { setState('LISTENING', 'no user turn'); return }
+    state._triggerHeardAt = last.timestamp
     const ageMs = Date.now() - last.timestamp
     if (ageMs > STALE_USER_TURN_MS) {
       console.log(`[gate] last user turn is stale (${ageMs}ms) — skipping`)
@@ -189,7 +194,7 @@ const stageHandlers = {
     const multiHint = recent.length >= 2
       ? `\n\nMultiple people just spoke at the same time: ${recent.map(s => s.username).join(' and ')}. Address both in your one reply.`
       : ''
-    const raw = await generateLLM(`${buildContext()}${multiHint}\n\nReply with the bot's next spoken turn. Keep it conversational and natural — a sentence or two, and finish your thought.`, state.characterPrompt || undefined, abort.signal, { maxTokens: ANSWER_MAX_TOKENS })
+    const raw = await generateLLM(`${buildContext()}${multiHint}`, state.characterPrompt || undefined, abort.signal, { maxTokens: ANSWER_MAX_TOKENS })
     if (state.abort !== abort) return
     const latencyMs = Date.now() - t0
     state.metrics.lastAnswerMs = latencyMs
@@ -203,20 +208,25 @@ const stageHandlers = {
     const text = state._pendingResponse || ''
     state._pendingResponse = null
     if (!text) { setState('LISTENING', 'no text'); return }
+    state._botSpeechWords = wordSet(text)        // for the self-echo content filter
     let chunksPlayed = 0
     state._chunksPlayed = 0
     const speakStart = Date.now()
     const onChunk = (audio, sr) => {
       if (abort.signal.aborted || !state.audioSink) return
+      // keep the echo window alive while the bot's audio is actually playing
+      const durMs = (audio.length / (sr || SAMPLE_RATE_TTS_FALLBACK)) * 1000
+      state._echoActiveUntil = Date.now() + durMs + ECHO_TAIL_MS
       if (chunksPlayed === 0) {
-        state.metrics.lastTtsFirstChunkMs = Date.now() - speakStart
+        state._firstAudioAt = Date.now()
+        state.metrics.lastTtsFirstChunkMs = state._firstAudioAt - speakStart
         console.log(`[gate] tts first-chunk ${state.metrics.lastTtsFirstChunkMs}ms`)
       }
       // Chatterbox occasionally produces peaks > 1.0; hard-clipping in the
       // sink causes audible distortion. Soft-attenuate before resample so the
       // entire chain stays inside [-1, 1] without losing dynamics.
       const out = resampleAudio(audio, sr || SAMPLE_RATE_TTS_FALLBACK, SAMPLE_RATE_DISCORD)
-      const TTS_GAIN = Number(process.env.TTS_GAIN || 0.8)
+      const TTS_GAIN = Number(process.env.TTS_GAIN || 1.0) // lux is already normalized + clamped
       if (TTS_GAIN !== 1) for (let i = 0; i < out.length; i++) out[i] *= TTS_GAIN
       state.audioSink(out, text)
       chunksPlayed++
@@ -228,7 +238,16 @@ const stageHandlers = {
       if (chunksPlayed > 0) {
         const words = text.split(/\s+/)
         const partial = abort.signal.aborted ? words.slice(0, Math.max(1, Math.floor(words.length * (chunksPlayed / (chunksPlayed + 2))))).join(' ') : text
-        snapHistory('bot', partial)
+        snapHistory('bot', partial, null, {
+          gate: state.lastDecision?.source,
+          gateMs: state.lastDecision?.latencyMs,
+          answerMs: state.metrics.lastAnswerMs,
+          firstAudioMs: state.metrics.lastTtsFirstChunkMs,
+          // the real responsiveness: heard -> first sound out
+          replyMs: (state._firstAudioAt && state._triggerHeardAt) ? state._firstAudioAt - state._triggerHeardAt : null,
+          spokeForMs: state._firstAudioAt ? Date.now() - state._firstAudioAt : null,
+          aborted: abort.signal.aborted,
+        })
         if (!abort.signal.aborted) state.metrics.spoken++
       }
       if (state.name === 'SPEAKING') setState('LISTENING', `done chunks=${chunksPlayed}`)
@@ -249,8 +268,26 @@ function isWordlessOrSentinel(text) {
   return alphanumCount < MIN_WORD_CHARS
 }
 
+// Self-echo content filter: while the bot's audio is playing (+ a tail), drop any
+// inbound transcription whose words mostly overlap what the bot is saying -- that
+// is the bot's own voice coming back through open speakers, not a new utterance.
+// Stops the bot replying to itself AND stops it aborting its own sentence.
+const ECHO_TAIL_MS = Number(process.env.GATE_ECHO_TAIL_MS || 2500)
+const ECHO_OVERLAP = Number(process.env.GATE_ECHO_OVERLAP || 0.5)
+function wordSet(text) { return new Set((text || '').toLowerCase().match(/[a-z0-9']+/g) || []) }
+function isBotEcho(text) {
+  if (!state._echoActiveUntil || Date.now() > state._echoActiveUntil) return false
+  if (!state._botSpeechWords || !state._botSpeechWords.size) return false
+  const w = (text || '').toLowerCase().match(/[a-z0-9']+/g) || []
+  if (!w.length) return false
+  let hit = 0
+  for (const tok of w) if (state._botSpeechWords.has(tok)) hit++
+  return hit / w.length >= ECHO_OVERLAP
+}
+
 export function noteWhisperWord({ userId, username, text }) {
   if (isWordlessOrSentinel(text)) return
+  if (isBotEcho(text)) { console.log(`[gate] dropped self-echo: "${text.slice(0, 50)}"`); return }
   state.lastWhisperAt = Date.now()
   state.activeSpeakers.set(userId, { username, lastWordAt: state.lastWhisperAt, lastText: text })
   const last = state.history[state.history.length - 1]
