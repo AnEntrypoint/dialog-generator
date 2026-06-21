@@ -15,7 +15,10 @@ const STAGE_TIMEOUT = {
   ANSWERING: Number(process.env.GATE_TIMEOUT_ANSWER_MS || 15000),
   SPEAKING: Number(process.env.GATE_TIMEOUT_SPEAKING_MS || 30000),
 }
-const MAX_RESPONSE_CHARS = 280
+const MAX_RESPONSE_CHARS = Number(process.env.GATE_MAX_RESPONSE_CHARS || 600)
+// Token budget for the spoken reply. 50 cut responses off mid-sentence; allow a
+// normal sentence-or-two reply. TTS streams per sentence so length != huge delay.
+const ANSWER_MAX_TOKENS = Number(process.env.GATE_ANSWER_MAX_TOKENS || 200)
 const MAX_HISTORY = 12
 
 const GATE_PROMPT = [
@@ -164,7 +167,7 @@ const stageHandlers = {
     const multiHint = recent.length >= 2
       ? `\n\nMultiple people just spoke at the same time: ${recent.map(s => s.username).join(' and ')}. Address both in your one reply.`
       : ''
-    const raw = await generateLLM(`${buildContext()}${multiHint}\n\nReply with the bot's next spoken turn. Keep it conversational and short.`, state.characterPrompt || undefined, abort.signal, { maxTokens: 50 })
+    const raw = await generateLLM(`${buildContext()}${multiHint}\n\nReply with the bot's next spoken turn. Keep it conversational and natural — a sentence or two, and finish your thought.`, state.characterPrompt || undefined, abort.signal, { maxTokens: ANSWER_MAX_TOKENS })
     if (state.abort !== abort) return
     const latencyMs = Date.now() - t0
     state.metrics.lastAnswerMs = latencyMs
