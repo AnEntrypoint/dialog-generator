@@ -1,0 +1,45 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>F5-TTS worker test</title></head>
+<body>
+<pre id="log">booting...</pre>
+<script type="module">
+  // Minimal harness to witness the F5-TTS worker on real WebGPU.
+  // Exposes window.__f5 for the gm browser verb. Keeps only the LAST status
+  // string (not an unbounded array) so the main thread stays responsive under
+  // the rapid model-download progress messages.
+  const w = new Worker('./tts-worker.js?v=8', { type: 'module' })
+  window.__f5 = { last: 'booting', voices: null, voiceLoaded: false, samples: 0, peak: 0, done: false, error: null, t0: performance.now() }
+  const el = document.getElementById('log')
+  w.onmessage = (e) => {
+    const m = e.data
+    if (m.type === 'status') window.__f5.last = m.status
+    else if (m.type === 'voices_loaded') {
+      window.__f5.voices = m.voices
+      window.__f5.last = 'voices:' + m.voices.join(',')
+      w.postMessage({ type: 'load_voice', voice: m.defaultVoice })
+    } else if (m.type === 'loaded') {
+      window.__f5.voiceLoaded = true
+      window.__f5.last = 'voice loaded, generating'
+      w.postMessage({ type: 'generate', data: { text: 'Hello there, this is a test of the new voice.' } })
+    } else if (m.type === 'audio_chunk') {
+      const f = new Float32Array(m.data)
+      window.__f5.samples = f.length
+      let p = 0; for (const v of f) p = Math.max(p, Math.abs(v))
+      window.__f5.peak = p
+      window.__f5.last = 'audio ' + f.length
+    } else if (m.type === 'stream_ended') {
+      window.__f5.done = true
+      window.__f5.ms = Math.round(performance.now() - window.__f5.t0)
+      window.__f5.last = 'done'
+    } else if (m.type === 'error') {
+      window.__f5.error = m.error
+      window.__f5.last = 'ERROR: ' + m.error
+    }
+    el.textContent = window.__f5.last  // single string, cheap
+  }
+  w.onerror = (e) => { window.__f5.error = String(e.message || e); el.textContent = 'workererr' }
+  w.postMessage({ type: 'load' })
+</script>
+</body>
+</html>

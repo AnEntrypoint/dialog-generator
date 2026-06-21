@@ -74,3 +74,5 @@ models/whisper/Xenova/whisper-base/onnx/
 models/whisper/onnx-community/
 
 .tmp-f5/
+.gm/browser-profile/
+.gm/browser-profile-*/
