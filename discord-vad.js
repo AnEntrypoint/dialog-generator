@@ -9,7 +9,11 @@ const MAX_GAIN = 25
 const MIN_GAIN = 1
 const GAIN_ATTACK = 0.25
 const GAIN_MIN_RMS = 0.003
-const BOT_SPEAK_TAIL_MS = 250
+// Mask inbound audio for this long AFTER the bot's last TTS chunk, to swallow
+// acoustic loopback (the bot's voice returning through a user's speakers->mic
+// with round-trip latency). The real cure is headphones on the user side; this
+// covers the common open-speaker case. Env-tunable.
+const BOT_SPEAK_TAIL_MS = Number(process.env.BOT_SPEAK_TAIL_MS || 1500)
 
 const userBuffers = new Map()
 let _processingQueue = null

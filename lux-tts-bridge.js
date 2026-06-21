@@ -57,6 +57,7 @@ let GUIDANCE = Number(process.env.LUX_GUIDANCE || 3.0)
 // (effective 0.65) yields natural duration at RTF ~1. Tune via LUX_SPEED.
 let SPEED = Number(process.env.LUX_SPEED || 0.5)
 let REF_SECONDS = Number(process.env.LUX_REF_SECONDS || 5)
+const TARGET_PEAK = Number(process.env.LUX_TARGET_PEAK || 0.85) // normalize output to audible level
 let SEED = Number(process.env.LUX_SEED || 666)
 
 // Each chunk must fit the vocos fixed length (VOCOS_FRAMES=768 mel frames ~ 8.2s
@@ -328,10 +329,23 @@ async function applyRefCap() {
     mono = mono.slice(0, capSamples)
     if (txt) { const w = txt.split(/\s+/); txt = w.slice(0, Math.max(1, Math.round(w.length * frac))).join(' ') }
   }
-  const { features, frames } = vocosFbank(mono)
-  // scale into model feature space
-  const scaled = new Float32Array(features.length)
-  for (let i = 0; i < features.length; i++) scaled[i] = features[i] * FEAT_SCALE
+  // Prefer a precomputed reference mel (`<wav>.luxmel.f32`) extracted by the REAL
+  // vocos MelSpectrogramFeatures (tools/.../extract-lux-ref.py). The JS vocosFbank
+  // is a reimplementation whose mel-scale/center-pad did not exactly match vocos,
+  // which made the cloned voice robotic. The precomputed file is already in model
+  // feature space (log-mel * FEAT_SCALE).
+  let scaled, frames
+  if (_refMelPath && fs.existsSync(_refMelPath)) {
+    const buf = fs.readFileSync(_refMelPath)
+    scaled = new Float32Array(buf.buffer, buf.byteOffset, Math.floor(buf.byteLength / 4))
+    frames = Math.floor(scaled.length / FEAT_DIM)
+    console.log(`[lux-tts] using precomputed ref mel ${path.basename(_refMelPath)} (${frames} frames)`)
+  } else {
+    const r = vocosFbank(mono)
+    frames = r.frames
+    scaled = new Float32Array(r.features.length)
+    for (let i = 0; i < r.features.length; i++) scaled[i] = r.features[i] * FEAT_SCALE
+  }
   refPromptFeatures = scaled
   refPromptFramesLen = frames
   refRms = rms(mono)
@@ -340,12 +354,14 @@ async function applyRefCap() {
   console.log(`[lux-tts] ref voice set: ${refSource} (${mono.length} samples / ${(mono.length / FEATURE_RATE).toFixed(1)}s, ${frames} mel frames, ${refPromptTokens.length} prompt tokens)`)
 }
 
+let _refMelPath = null
 export async function setRefVoice(wavPath, text) {
   await ensureModel()
   const { audio, sampleRate } = readWavMono(wavPath)
   _fullRefMono = resampleMono(audio, sampleRate, FEATURE_RATE) // mel features are @24k
   _fullRefText = (text || '').trim()
   refSource = path.basename(wavPath)
+  _refMelPath = wavPath.replace(/\.wav$/i, '.luxmel.f32')
   await applyRefCap()
 }
 
@@ -374,8 +390,17 @@ async function generateChunk(genText, signal) {
   if (pred.frames > VOCOS_FRAMES) {
     console.warn(`[lux-tts] gen frames ${pred.frames} > ${VOCOS_FRAMES}; truncating (chunk too long)`)
   }
-  const audio = await vocodeChunk(sessions, pred.data, frames, refRms, 0.1)
+  const raw = await vocodeChunk(sessions, pred.data, frames, refRms, 0.1)
   if (signal?.aborted) return null
+  // vocodeChunk matches the reference clip's loudness, which for cleetus is very
+  // quiet (peak ~0.035) -> inaudible in Discord. Normalize each chunk to an
+  // audible target peak. LUX_TARGET_PEAK tunes it.
+  let peak = 0
+  for (let i = 0; i < raw.length; i++) { const a = raw[i] < 0 ? -raw[i] : raw[i]; if (a > peak) peak = a }
+  if (peak < 1e-5) return raw
+  const g = TARGET_PEAK / peak
+  const audio = new Float32Array(raw.length)
+  for (let i = 0; i < raw.length; i++) { const v = raw[i] * g; audio[i] = v > 1 ? 1 : v < -1 ? -1 : v }
   return audio
 }
 
