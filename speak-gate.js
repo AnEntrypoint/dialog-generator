@@ -1,5 +1,5 @@
 import { generate as generateLLM, isAvailable as isLLMAvailable, buildGrammar } from './llm.js'
-import { synthesizeStream, setRefVoice as _setRefVoice } from './chatterbox-tts-bridge.js'
+import { synthesizeStream, setRefVoice as _setRefVoice } from './f5-tts-bridge.js'
 import { resampleAudio } from './server-utils.mjs'
 
 const SAMPLE_RATE_DISCORD = 48000

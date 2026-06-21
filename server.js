@@ -4,7 +4,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { encodeWAV, buildAfan } from './server-utils.mjs'
 import { LipsyncSDKNode } from '../a2f/lipsync-sdk-node.mjs'
-import { synthesize as synthesizeTTS, setRefVoice as chatterboxSetRef } from './chatterbox-tts-bridge.js'
+import { synthesize as synthesizeTTS, setRefVoice as chatterboxSetRef } from './f5-tts-bridge.js'
 import { generate as generateLLM, isAvailable as isLLMAvailable } from './llm.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -248,7 +248,7 @@ app.get('/debug/speak-gate', async (req, res) => {
 
 app.get('/debug/tts', async (req, res) => {
   try {
-    const { getDebugState } = await import('./chatterbox-tts-bridge.js')
+    const { getDebugState } = await import('./f5-tts-bridge.js')
     res.json(getDebugState())
   } catch (err) {
     res.status(500).json({ error: err.message })
