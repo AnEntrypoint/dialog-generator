@@ -4,7 +4,7 @@
 
 import { describe, it, expect, vi } from 'vitest'
 
-vi.mock('../f5-tts-bridge.js', () => ({
+vi.mock('../lux-tts-bridge.js', () => ({
   synthesizeStream: vi.fn(async (text, refPath, refText, onChunk, signal) => {
     // Simulate a TTS that takes ~200ms to start, then emits 3 chunks
     await new Promise(r => setTimeout(r, 200))

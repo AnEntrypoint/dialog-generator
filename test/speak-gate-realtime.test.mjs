@@ -6,7 +6,7 @@ vi.mock('../llm.js', () => ({
   buildGrammar: vi.fn(async (g) => ({ __test: true, source: g })),
 }))
 
-vi.mock('../f5-tts-bridge.js', () => ({
+vi.mock('../lux-tts-bridge.js', () => ({
   synthesizeStream: vi.fn(async (text, refPath, refText, onChunk, signal) => {
     onChunk(new Float32Array(2400), 24000)
     onChunk(new Float32Array(2400), 24000)

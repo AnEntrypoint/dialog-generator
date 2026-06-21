@@ -4,7 +4,7 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import { encodeWAV, buildAfan } from './server-utils.mjs'
 import { LipsyncSDKNode } from '../a2f/lipsync-sdk-node.mjs'
-import { synthesize as synthesizeTTS, setRefVoice as setTTSRefVoice } from './f5-tts-bridge.js'
+import { synthesize as synthesizeTTS, setRefVoice as setTTSRefVoice } from './lux-tts-bridge.js'
 import { generate as generateLLM, isAvailable as isLLMAvailable } from './llm.js'
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url))
@@ -225,7 +225,7 @@ app.post('/api/discord/voice/disconnect', (req, res) => {
 // nfeSteps is the main lever - lower = faster + hissier, higher = slower + cleaner.
 app.post('/api/tts/config', async (req, res) => {
   try {
-    const { setSynthConfig } = await import('./f5-tts-bridge.js')
+    const { setSynthConfig } = await import('./lux-tts-bridge.js')
     res.json(setSynthConfig(req.body || {}))
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -288,7 +288,7 @@ app.get('/debug/speak-gate', async (req, res) => {
 
 app.get('/debug/tts', async (req, res) => {
   try {
-    const { getDebugState } = await import('./f5-tts-bridge.js')
+    const { getDebugState } = await import('./lux-tts-bridge.js')
     res.json(getDebugState())
   } catch (err) {
     res.status(500).json({ error: err.message })
@@ -376,7 +376,7 @@ async function start() {
   // first user utterance is already at warm-streaming latency (~700ms first chunk)
   if (process.env.WARMUP_TTS !== 'false') {
     try {
-      console.log('[server] Warming up F5-TTS (model load + reference)...')
+      console.log('[server] Warming up LuxTTS (model load + reference)...')
       const warmupStart = performance.now()
       const cleetusTxt = CLEETUS_WAV.replace(/\.wav$/, '.txt')
       const refText = fs.existsSync(cleetusTxt) ? fs.readFileSync(cleetusTxt, 'utf8').trim().slice(0, 300) : ''

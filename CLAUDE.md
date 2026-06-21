@@ -178,7 +178,30 @@ Alternative models available: `Xenova/whisper-small` (74MB), `Xenova/whisper-bas
 
 - **HTML-poisoned cache**: GitHub Pages 404 responses are HTML (`<!DOCTYPE html>`) and can be large enough to pass a byte-size check. The cache bust must also check the first byte: `new Uint8Array(buf.slice(0,1))[0] === 0x3C` means HTML, delete it.
 
-## TTS — F5-TTS (nsarang, ONNX both sides)
+## TTS — LuxTTS (ZipVoice-distill) for Discord; F5-TTS for the web demo
+
+**The Discord voice path uses LuxTTS** (`lux-tts-bridge.js`), a ZipVoice-distill
+ONNX pipeline that is ~3.3x faster than F5 (RTF ~1.15 vs ~3.8) because it runs only
+**4 flow-matching steps** (vs F5's 32). `speak-gate.js` + `server.js` import
+`lux-tts-bridge.js`; the F5 bridge below is retained for the GitHub-Pages web demo
+(no latency pressure there).
+
+- Core: `lux-core.mjs` (runtime-agnostic 4-step anchored flow-matching sampler,
+  port of `zipvoice/onnx_modeling.py:sample`, verified vs torch to 8dp),
+  `lux-ort-node.mjs` (onnxruntime-node factory), `lux-tokenizer.mjs` (espeak-IPA ->
+  token ids via `tokens.txt`).
+- Models (gitignored, ~125 MB) under `models/tts/lux/`:
+  `text_encoder_int8.onnx`, `fm_decoder_int8.onnx`, `vocos.onnx`. Regenerate with
+  `bash tools/regen-lux-models.sh` (clones k2-fsa/ZipVoice, downloads the
+  zipvoice_distill checkpoint + LinaCodec vocos, runs `zipvoice.bin.onnx_export` +
+  `tools/export-vocos.py`). 48 kHz output (so `speak-gate`'s 24k->48k resample is a
+  no-op). Reference is zero-shot from `voices/cleetus.wav` + transcript (mel
+  features + prompt tokens).
+- Caveat: the JS mel feature-extraction (`vocosFbank`) parity vs torchaudio is not
+  independently witnessed, so voice TIMBRE fidelity to Cleetus is judged by ear; the
+  audio is clean speech.
+
+## (legacy) TTS — F5-TTS (nsarang, ONNX both sides)
 
 Server and browser use **F5-TTS** (Flow Matching with a Diffusion Transformer) via
 ONNX, ported from [nsarang/voice-cloning-f5-tts](https://github.com/nsarang/voice-cloning-f5-tts)
