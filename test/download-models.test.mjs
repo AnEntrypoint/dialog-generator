@@ -15,10 +15,11 @@ describe('download-models structure', () => {
     expect(src).not.toContain('ipfs')
   })
 
-  it('tts model includes required ONNX files', () => {
+  it('tts model includes the F5-TTS ONNX files', () => {
     const src = fs.readFileSync(path.join(process.cwd(), 'download-models.js'), 'utf8')
-    expect(src).toContain('flow_lm_flow_int8.onnx')
-    expect(src).toContain('mimi_decoder_int8.onnx')
-    expect(src).toContain('text_conditioner.onnx')
+    expect(src).toContain('encoder_fp32.onnx')
+    expect(src).toContain('decoder_fp32.onnx')
+    expect(src).toContain('transformer_fp32.onnx')
+    expect(src).toContain('vocab.txt')
   })
 })
