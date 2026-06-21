@@ -1,65 +1,92 @@
-import { ChatterboxModel, AutoProcessor, Tensor, env } from 'https://cdn.jsdelivr.net/npm/@huggingface/transformers@4.2.0'
+// F5-TTS demo worker (replaces the Chatterbox worker). Runs the vendored f5-core
+// over onnxruntime-web (WebGPU, WASM fallback). The 3 ONNX models load directly
+// from the HF repo nsarang/F5-TTS-ONNX (browser-cached); reference audio is a WAV
+// fetched and decoded at runtime (workers have no AudioContext). 24kHz output.
+import { F5TTS, Tensor } from './f5-core.bundle.js'
 
-const MODEL_ID = 'onnx-community/chatterbox-ONNX'
 const SAMPLE_RATE = 24000
-const TYPED_ARRAYS = { float32: Float32Array, int64: BigInt64Array }
+const REPO = 'nsarang/F5-TTS-ONNX'
+const NFE_STEPS = 16
+const SPEED = 1.0
 
-// onnx-community/chatterbox-ONNX only ships q4f16/q4 for language_model; others are fp32
-const DTYPE_WEBGPU = { embed_tokens: 'fp32', speech_encoder: 'fp32', language_model: 'q4f16', conditional_decoder: 'fp32' }
-const DTYPE_WASM = { embed_tokens: 'fp32', speech_encoder: 'fp32', language_model: 'q4', conditional_decoder: 'fp32' }
-
-let model = null, processor = null
-let activeVoice = null
-let activeEmbeddings = null
+let model = null
 let aborted = false
+let refAudioTensor = null
+let refText = ''
+let activeVoice = null
 
-async function checkWebGPU() {
-  if (typeof navigator === 'undefined' || !navigator.gpu) return false
-  try { return Boolean(await navigator.gpu.requestAdapter()) } catch { return false }
+// Minimal WAV (PCM16 / float32) decoder -> mono Float32 at SAMPLE_RATE.
+function decodeWavMono(arrayBuffer) {
+  const dv = new DataView(arrayBuffer)
+  const sampleRate = dv.getUint32(24, true)
+  const channels = dv.getUint16(22, true)
+  const bits = dv.getUint16(34, true)
+  // find 'data' chunk
+  let off = 12
+  while (off < dv.byteLength) {
+    const id = String.fromCharCode(dv.getUint8(off), dv.getUint8(off + 1), dv.getUint8(off + 2), dv.getUint8(off + 3))
+    const size = dv.getUint32(off + 4, true)
+    if (id === 'data') { off += 8; var dataOff = off, dataLen = size; break }
+    off += 8 + size
+  }
+  const n = dataLen / (bits / 8) / channels
+  const mono = new Float32Array(n)
+  for (let i = 0; i < n; i++) {
+    let s = 0
+    for (let c = 0; c < channels; c++) {
+      const p = dataOff + (i * channels + c) * (bits / 8)
+      s += bits === 16 ? dv.getInt16(p, true) / 32768 : dv.getFloat32(p, true)
+    }
+    mono[i] = s / channels
+  }
+  return resampleMono(mono, sampleRate, SAMPLE_RATE)
+}
+
+function resampleMono(audio, from, to) {
+  if (from === to) return audio
+  const ratio = from / to
+  const out = new Float32Array(Math.round(audio.length / ratio))
+  for (let i = 0; i < out.length; i++) {
+    const idx = i * ratio, lo = Math.floor(idx), hi = Math.min(lo + 1, audio.length - 1)
+    out[i] = audio[lo] * (1 - (idx - lo)) + audio[hi] * (idx - lo)
+  }
+  return out
 }
 
 async function loadModel() {
-  const useDevice = (await checkWebGPU()) ? 'webgpu' : 'wasm'
-  self.postMessage({ type: 'status', status: `Loading model (${useDevice})…` })
-  processor = await AutoProcessor.from_pretrained(MODEL_ID)
-  model = await ChatterboxModel.from_pretrained(MODEL_ID, {
-    device: useDevice,
-    dtype: useDevice === 'webgpu' ? DTYPE_WEBGPU : DTYPE_WASM,
-    progress_callback: (p) => {
-      if (p.status === 'progress') {
-        const pct = p.progress != null ? ` ${Math.round(p.progress)}%` : ''
-        self.postMessage({ type: 'status', status: `Loading: ${p.file}${pct}` })
-      }
+  model = new F5TTS({
+    repoName: REPO,
+    rootPath: '',
+    useFP16: true,
+    emit: (_stage, info) => {
+      if (info?.message) self.postMessage({ type: 'status', status: info.message })
     },
   })
-  return useDevice
+  await model.initialize()
+  return model.useFP16 ? 'webgpu/fp16' : 'wasm/fp32'
 }
 
 async function loadVoice(name) {
-  const binResp = await fetch(`./voices/${name}.embedding.bin`)
-  const jsonResp = await fetch(`./voices/${name}.embedding.json`)
-  if (!binResp.ok || !jsonResp.ok) throw new Error(`voice ${name}: pre-encoded embedding not found (run tools/encode-speakers.mjs)`)
-  const manifest = await jsonResp.json()
-  const buf = new Uint8Array(await binResp.arrayBuffer())
-  const tensors = {}
-  for (const [key, meta] of Object.entries(manifest.tensors)) {
-    const Ctor = TYPED_ARRAYS[meta.dtype]
-    if (!Ctor) throw new Error(`unsupported dtype ${meta.dtype}`)
-    const slice = buf.buffer.slice(buf.byteOffset + meta.byteOffset, buf.byteOffset + meta.byteOffset + meta.byteLength)
-    tensors[key] = new Tensor(meta.dtype, new Ctor(slice), meta.dims)
-  }
+  const [wavResp, txtResp] = await Promise.all([
+    fetch(`./voices/${name}.wav`),
+    fetch(`./voices/${name}.txt`).catch(() => null),
+  ])
+  if (!wavResp.ok) throw new Error(`voice ${name}: ${name}.wav not found`)
+  const mono = decodeWavMono(await wavResp.arrayBuffer())
+  refAudioTensor = new Tensor('float32', mono, [mono.length])
+  refText = txtResp && txtResp.ok ? (await txtResp.text()).trim().slice(0, 300) : ''
   activeVoice = name
-  activeEmbeddings = tensors
 }
 
 async function generate(text) {
-  if (!model || !processor) throw new Error('Model not loaded')
-  if (!activeEmbeddings) throw new Error('Voice not loaded')
+  if (!model) throw new Error('Model not loaded')
+  if (!refAudioTensor) throw new Error('Voice not loaded')
   aborted = false
-  const inputs = await processor._call(text)
-  const waveform = await model.generate({ ...inputs, ...activeEmbeddings, exaggeration: 0.5, max_new_tokens: 256 })
+  const out = await model.inference({
+    refAudio: refAudioTensor, refText, genText: text, speed: SPEED, nfeSteps: NFE_STEPS,
+  })
   if (aborted) return
-  const data = waveform.data
+  const data = out.data instanceof Float32Array ? out.data : Float32Array.from(out.data)
   const buf = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength)
   self.postMessage({ type: 'audio_chunk', data: buf }, [buf])
   self.postMessage({ type: 'stream_ended' })
@@ -71,7 +98,7 @@ self.onmessage = async (e) => {
     if (type === 'load') {
       const device = await loadModel()
       self.postMessage({ type: 'status', status: `Model loaded (${device})` })
-      const manifest = await fetch('./voices/manifest.json').then((r) => r.json())
+      const manifest = await fetch('./voices/manifest.json').then((r) => r.json()).catch(() => ['cleetus.wav'])
       const voices = manifest.map((f) => f.replace(/\.wav$/, ''))
       self.postMessage({ type: 'voices_loaded', voices, defaultVoice: voices[0] || 'cleetus' })
     } else if (type === 'load_voice') {
