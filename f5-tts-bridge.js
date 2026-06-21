@@ -120,10 +120,17 @@ async function ensureModel() {
     const transformerPath = useFP16 ? fp16Path : fp32Path
 
     const m = new f5.F5TTS({ useFP16 })
-    const opts = { executionProviders: ['cpu'], graphOptimizationLevel: 'all' }
-    m.sessions.encoder = await ort.InferenceSession.create(path.join(MODEL_DIR, 'onnx/encoder_fp32.onnx'), opts)
+    // fp16 weights need a GPU EP (DirectML on Windows); CPU lacks fp16 kernels.
+    // fp32 runs on CPU. F5_EP overrides the provider list explicitly.
+    const eps = process.env.F5_EP
+      ? process.env.F5_EP.split(',')
+      : useFP16 ? ['dml', 'cpu'] : ['cpu']
+    const opts = { executionProviders: eps, graphOptimizationLevel: 'all' }
+    const cpuOpts = { executionProviders: ['cpu'], graphOptimizationLevel: 'all' }
+    // encoder/decoder are fp32 -> CPU; only the transformer follows `eps`.
+    m.sessions.encoder = await ort.InferenceSession.create(path.join(MODEL_DIR, 'onnx/encoder_fp32.onnx'), cpuOpts)
     m.sessions.transformer = await ort.InferenceSession.create(transformerPath, opts)
-    m.sessions.decoder = await ort.InferenceSession.create(path.join(MODEL_DIR, 'onnx/decoder_fp32.onnx'), opts)
+    m.sessions.decoder = await ort.InferenceSession.create(path.join(MODEL_DIR, 'onnx/decoder_fp32.onnx'), cpuOpts)
 
     // vocab loading, identical to F5TTS.initialize (line-index ids, blanks skipped)
     const vocabText = fs.readFileSync(path.join(MODEL_DIR, 'vocab.txt'), 'utf8')
@@ -131,7 +138,7 @@ async function ensureModel() {
     vocabText.split('\n').forEach((char, idx) => { if (char.trim()) m.vocabMap[char.trim()] = idx })
 
     model = m
-    console.log('[f5-tts] model loaded (onnxruntime-node, fp32)')
+    console.log(`[f5-tts] model loaded (transformer ${useFP16 ? 'fp16' : 'fp32'} via ${eps.join('/')})`)
   })()
   return loadPromise
 }

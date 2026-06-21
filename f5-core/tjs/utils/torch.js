@@ -88,7 +88,18 @@ export class Tensor {
       this.ort = args[0]; // Copy existing ONNXTensor
       this.register = args[1] ?? true;
     } else {
-      const [dataType, dataArray, dims, register = true] = args;
+      let [dataType, dataArray, dims, register = true] = args;
+      // onnxruntime represents float16 tensors as Uint16Array (raw fp16 bits).
+      // Node >=22 / recent browsers expose a real Float16Array, which our dtype
+      // map uses for correct float->fp16 conversion; reinterpret its buffer as
+      // Uint16Array so ORT sees the right element count (else "not enough space").
+      if (
+        dataType === "float16" &&
+        typeof Float16Array !== "undefined" &&
+        dataArray instanceof Float16Array
+      ) {
+        dataArray = new Uint16Array(dataArray.buffer, dataArray.byteOffset, dataArray.length);
+      }
       this.ort = new ONNXTensor(dataType, dataArray, dims);
       this.register = register;
     }
