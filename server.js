@@ -221,6 +221,20 @@ app.post('/api/discord/voice/disconnect', (req, res) => {
   }
 })
 
+app.post('/api/discord/voice/say', async (req, res) => {
+  try {
+    const { text } = req.body
+    if (!text) return res.status(400).json({ error: 'text required' })
+    const sg = await import('./speak-gate.js')
+    const { chunks } = await sg.speak(text)
+    if (chunks === 0) return res.status(503).json({ error: 'no audio sink (bot not in a voice channel?)' })
+    res.json({ success: true, chunks })
+  } catch (err) {
+    console.error('[api] Discord voice say error:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.post('/api/discord/message', async (req, res) => {
   if (!sendMessage) return res.status(503).json({ error: 'Discord not enabled' })
   try {
@@ -351,6 +365,12 @@ async function start() {
     }
   }
 
+  // Listen BEFORE Discord init so a slow/rate-limited gateway never blocks the
+  // HTTP server (debug + API stay reachable; Discord connects in the background).
+  app.listen(port, '0.0.0.0', () => {
+    console.log(`diagen server running on http://localhost:${port}`)
+  })
+
   // Lazy load Discord modules only if DISCORD_TOKEN is set
   if (process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN) {
     try {
@@ -412,10 +432,6 @@ async function start() {
       console.error('[server] Failed to load Discord modules:', err.message)
     }
   }
-
-  app.listen(port, '0.0.0.0', () => {
-    console.log(`diagen server running on http://localhost:${port}`)
-  })
 }
 start().catch(err => {
   console.error('Startup failed:', err)

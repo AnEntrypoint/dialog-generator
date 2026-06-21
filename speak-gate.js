@@ -228,11 +228,34 @@ export function noteWhisperWord({ userId, username, text }) {
 
 export function setRefVoice(refPath, refText) {
   state.refPath = refPath; state.refText = refText
-  if (refPath) _setRefVoice(refPath).catch(err => console.error('[gate] setRefVoice failed:', err.message))
+  // Pass the transcript: the F5 bridge uses its internally-set refText (its
+  // synthesize ignores the per-call _refText arg). Without it, refText='' makes
+  // the F5 duration formula divide by ~0 -> out-of-range token index.
+  if (refPath) _setRefVoice(refPath, refText).catch(err => console.error('[gate] setRefVoice failed:', err.message))
 }
 export function setCharacterCardPrompt(prompt) { state.characterPrompt = prompt }
 export function setAudioSink(fn) { state.audioSink = fn }
 export function clearHistory() { state.history.length = 0; console.log('[gate] history cleared') }
+
+// Directly synthesize `text` (F5-TTS) and push it through the active audio sink
+// -- the same resample (24k->48k) + sink path the SPEAKING stage uses. Lets the
+// bot speak an arbitrary phrase without a human utterance (ops + Discord testing).
+// Returns the number of audio chunks pushed.
+export async function speak(text) {
+  if (!text || !state.audioSink) return { chunks: 0, hasSink: Boolean(state.audioSink) }
+  let chunks = 0
+  const gain = Number(process.env.TTS_GAIN || 0.8)
+  const onChunk = (audio, sr) => {
+    if (!state.audioSink) return
+    const out = resampleAudio(audio, sr || SAMPLE_RATE_TTS_FALLBACK, SAMPLE_RATE_DISCORD)
+    if (gain !== 1) for (let i = 0; i < out.length; i++) out[i] *= gain
+    state.audioSink(out, text)
+    chunks++
+  }
+  await synthesizeStream(text, state.refPath, state.refText, onChunk)
+  if (chunks > 0) snapHistory('bot', text)
+  return { chunks }
+}
 
 export function getDebugSnapshot() {
   return {
