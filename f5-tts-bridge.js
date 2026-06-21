@@ -112,10 +112,17 @@ async function ensureModel() {
     const f5 = await import('./f5-core/f5-tts.js')
     torchMod = await import('./f5-core/tjs/utils/torch.js')
 
-    const m = new f5.F5TTS({ useFP16: false })
+    // Prefer fp32 transformer on CPU (onnxruntime-node); fall back to fp16 if
+    // that is the only weight present. F5_FP16=1 forces fp16.
+    const fp32Path = path.join(MODEL_DIR, 'onnx/transformer_fp32.onnx')
+    const fp16Path = path.join(MODEL_DIR, 'onnx/transformer_fp16.onnx')
+    const useFP16 = process.env.F5_FP16 === '1' || !fs.existsSync(fp32Path)
+    const transformerPath = useFP16 ? fp16Path : fp32Path
+
+    const m = new f5.F5TTS({ useFP16 })
     const opts = { executionProviders: ['cpu'], graphOptimizationLevel: 'all' }
     m.sessions.encoder = await ort.InferenceSession.create(path.join(MODEL_DIR, 'onnx/encoder_fp32.onnx'), opts)
-    m.sessions.transformer = await ort.InferenceSession.create(path.join(MODEL_DIR, 'onnx/transformer_fp32.onnx'), opts)
+    m.sessions.transformer = await ort.InferenceSession.create(transformerPath, opts)
     m.sessions.decoder = await ort.InferenceSession.create(path.join(MODEL_DIR, 'onnx/decoder_fp32.onnx'), opts)
 
     // vocab loading, identical to F5TTS.initialize (line-index ids, blanks skipped)
