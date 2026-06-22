@@ -104,7 +104,9 @@ function getOrCreateBuffer(userId) {
       const username = _usernameResolver(userId)
       speakGate.noteWhisperWord({ userId, username, text, confidence: conf })
     }
-    onPartial(userId, fire)
+    // whisper-stream fires once per utterance at end-of-speech (via onStable); the
+    // onPartial listener fired the SAME final text a second time, which the gate had
+    // to debounce away. Register only the stable fire -> one clean trigger.
     onStable(userId, fire)
   }
   return userBuffers.get(userId)

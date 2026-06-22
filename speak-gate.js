@@ -11,7 +11,10 @@ const SAMPLE_RATE_TTS_FALLBACK = 24000
 // speech silence), so this gate debounce only needs to coalesce near-simultaneous
 // utterances, not wait out the pause again -- 1100ms here was ~1s of pure latency.
 // Pause tolerance lives in WHISPER_UTTERANCE_END_MS, not here.
-const DEBOUNCE_MS = Number(process.env.GATE_DEBOUNCE_MS || 250)
+// 0 = no debounce wait: whisper already fires ONCE per utterance at its own
+// end-of-speech silence, so the gate triggers on the next tick. (Set >0 only to
+// re-coalesce if a source ever emits multiple fires per utterance again.)
+const DEBOUNCE_MS = Number(process.env.GATE_DEBOUNCE_MS || 0)
 // Skip the LLM gate call for messages that are clearly worth a reply — saves
 // ~1s round-trip per turn. The gate prompt says "YES by default" anyway.
 // Above this many chars the gate skips the LLM YES/NO call and just replies

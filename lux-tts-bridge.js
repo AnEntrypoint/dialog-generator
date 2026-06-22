@@ -73,6 +73,26 @@ let SEED = Number(process.env.LUX_SEED || 666)
 // Empirically ~10 chars/frame is far too generous; ZipVoice gen frames ~ phoneme
 // count. We cap by chars and clamp gen frames at vocode time as a hard backstop.
 const MAX_CHUNK_CHARS = Number(process.env.LUX_CHUNK_CHARS || 240)
+// Streaming chunks: a SMALL first chunk so the first fm pass finishes fast (the fm
+// can't stream a single pass, but a short first chunk's pass is quick -> first audio
+// ~1s instead of the whole-reply fm). Later chunks are larger (fewer fm passes =
+// less repeated reference-frame cost). Split at clause boundaries (natural pauses).
+const STREAM_FIRST_CHARS = Number(process.env.LUX_STREAM_FIRST_CHARS || 40)
+const STREAM_CHUNK_CHARS = Number(process.env.LUX_STREAM_CHUNK_CHARS || 160)
+function chunkForStreaming(text) {
+  const t = (text || '').trim()
+  if (!t) return []
+  const pieces = t.split(/(?<=[.!?,;:])\s+/).filter((p) => p.trim())
+  const out = []
+  let cur = ''
+  for (const p of pieces) {
+    const cap = out.length === 0 ? STREAM_FIRST_CHARS : STREAM_CHUNK_CHARS
+    if (cur && (cur + ' ' + p).length > cap) { out.push(cur); cur = p }
+    else cur = cur ? cur + ' ' + p : p
+  }
+  if (cur) out.push(cur)
+  return out
+}
 
 export function getSynthConfig() {
   return { numStep: NUM_STEP, tShift: T_SHIFT, guidanceScale: GUIDANCE, speed: SPEED, refSeconds: REF_SECONDS }
@@ -461,20 +481,15 @@ export async function synthesizeStream(text, _refPath, _refText, onChunk, signal
   if (!text) throw new Error('text required')
   if (typeof onChunk !== 'function') throw new Error('onChunk required')
   await ensureModel()
-  if (signal?.aborted || !refPromptFeatures) return { sampleRate: OUTPUT_RATE }
-  const tokens = await tokenizer.textToTokensLoaded(text)
-  if (!tokens.length || signal?.aborted) return { sampleRate: OUTPUT_RATE }
-  const pred = await sample(sessions, {
-    tokens, promptTokens: refPromptTokens, promptFeatures: refPromptFeatures,
-    promptFramesLen: refPromptFramesLen, speed: SPEED, tShift: T_SHIFT,
-    guidanceScale: GUIDANCE, numStep: NUM_STEP, seed: SEED,
-  })
   if (signal?.aborted) return { sampleRate: OUTPUT_RATE }
-  for (let off = 0; off < pred.frames; off += VOCOS_FRAMES) {
+  // Stream per meaningful chunk: each chunk is its own fm pass ('epoch'). The first
+  // chunk is short so its pass finishes fast (~1s) and audio starts immediately;
+  // q4-webgpu (RTF ~0.3) synthesizes chunk N+1 before chunk N finishes playing, so
+  // the dispipe pump streams them as one continuous voice. (The fm is non-causal so
+  // a single whole-reply pass can't stream -- chunking is what unlocks the fast start.)
+  for (const chunk of chunkForStreaming(text)) {
     if (signal?.aborted) break
-    const n = Math.min(VOCOS_FRAMES, pred.frames - off)
-    const windowPred = pred.data.subarray(off * FEAT_DIM, (off + n) * FEAT_DIM)
-    const audio = normalizePeak(await vocodeChunk(sessions, windowPred, n, refRms, 0.1))
+    const audio = await generateChunk(chunk, signal)
     if (audio && !signal?.aborted) onChunk(audio, OUTPUT_RATE)
   }
   return { sampleRate: OUTPUT_RATE }
