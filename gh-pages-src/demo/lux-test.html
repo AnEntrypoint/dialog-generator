@@ -21,8 +21,9 @@
       w.postMessage({ type: 'load_voice', voice: m.defaultVoice })
     } else if (m.type === 'loaded') {
       window.__luxResult.voiceLoaded = true
-      window.__luxResult.last = 'voice loaded, generating'
-      w.postMessage({ type: 'generate', data: { text: 'Hey, what is up. This is a test of the new voice.' } })
+      window.__luxResult.last = 'voice loaded, warming up'
+      window.__phase = 'warmup'
+      w.postMessage({ type: 'generate', data: { text: 'Warming up the pipeline now so the next call is hot.' } })
     } else if (m.type === 'audio_chunk') {
       const f = new Float32Array(m.data)
       window.__luxResult.samples = f.length
@@ -32,9 +33,18 @@
       window.__luxResult.finite = finite
       window.__luxResult.last = 'audio ' + f.length
     } else if (m.type === 'stream_ended') {
-      window.__luxResult.done = true
-      window.__luxResult.ms = Math.round(performance.now() - window.__luxResult.t0)
-      window.__luxResult.last = 'done samples=' + window.__luxResult.samples + ' peak=' + window.__luxResult.peak.toFixed(3)
+      if (window.__phase === 'warmup') {
+        // now run a TIMED warm synth (synth-only, no download/load in the clock)
+        window.__phase = 'warm'
+        window.__warmT0 = performance.now()
+        w.postMessage({ type: 'generate', data: { text: 'I reckon the coffee here is mighty fine on a morning like this one.' } })
+      } else {
+        window.__luxResult.warmMs = Math.round(performance.now() - window.__warmT0)
+        window.__luxResult.warmSec = (window.__luxResult.samples / SR)
+        window.__luxResult.warmRtf = +(window.__luxResult.warmMs / 1000 / window.__luxResult.warmSec).toFixed(2)
+        window.__luxResult.done = true
+        window.__luxResult.last = 'WARM synth=' + window.__luxResult.warmMs + 'ms audio=' + window.__luxResult.warmSec.toFixed(2) + 's RTF=' + window.__luxResult.warmRtf
+      }
     } else if (m.type === 'error') {
       window.__luxResult.error = m.error
       window.__luxResult.last = 'ERROR: ' + m.error

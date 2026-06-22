@@ -442,13 +442,41 @@ export async function synthesize(text, _refPath, _refText, signal) {
   return { audio, sampleRate: OUTPUT_RATE }
 }
 
+// One fm pass over the WHOLE reply (no text chunking, coherent prosody), then
+// stream the vocoder's 768-frame audio windows as each is produced. The fm is
+// non-causal so its frames are all ready at once (that latency is fixed); the
+// vocoder is the part that streams -> for a reply over one window (~8s) the first
+// window plays while later windows vocode.
+function normalizePeak(raw) {
+  let peak = 0
+  for (let i = 0; i < raw.length; i++) { const a = raw[i] < 0 ? -raw[i] : raw[i]; if (a > peak) peak = a }
+  if (peak < 1e-5) return raw
+  const g = TARGET_PEAK / peak
+  const out = new Float32Array(raw.length)
+  for (let i = 0; i < raw.length; i++) { const v = raw[i] * g; out[i] = v > 1 ? 1 : v < -1 ? -1 : v }
+  return out
+}
+
 export async function synthesizeStream(text, _refPath, _refText, onChunk, signal) {
   if (!text) throw new Error('text required')
   if (typeof onChunk !== 'function') throw new Error('onChunk required')
   await ensureModel()
+  if (signal?.aborted || !refPromptFeatures) return { sampleRate: OUTPUT_RATE }
+  const tokens = await tokenizer.textToTokensLoaded(text)
+  if (!tokens.length || signal?.aborted) return { sampleRate: OUTPUT_RATE }
+  const pred = await sample(sessions, {
+    tokens, promptTokens: refPromptTokens, promptFeatures: refPromptFeatures,
+    promptFramesLen: refPromptFramesLen, speed: SPEED, tShift: T_SHIFT,
+    guidanceScale: GUIDANCE, numStep: NUM_STEP, seed: SEED,
+  })
   if (signal?.aborted) return { sampleRate: OUTPUT_RATE }
-  const audio = await generateChunk(text, signal)
-  if (audio && !signal?.aborted) onChunk(audio, OUTPUT_RATE)
+  for (let off = 0; off < pred.frames; off += VOCOS_FRAMES) {
+    if (signal?.aborted) break
+    const n = Math.min(VOCOS_FRAMES, pred.frames - off)
+    const windowPred = pred.data.subarray(off * FEAT_DIM, (off + n) * FEAT_DIM)
+    const audio = normalizePeak(await vocodeChunk(sessions, windowPred, n, refRms, 0.1))
+    if (audio && !signal?.aborted) onChunk(audio, OUTPUT_RATE)
+  }
   return { sampleRate: OUTPUT_RATE }
 }
 
