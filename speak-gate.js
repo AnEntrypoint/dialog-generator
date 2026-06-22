@@ -14,7 +14,11 @@ const SAMPLE_RATE_TTS_FALLBACK = 24000
 const DEBOUNCE_MS = Number(process.env.GATE_DEBOUNCE_MS || 1100)
 // Skip the LLM gate call for messages that are clearly worth a reply — saves
 // ~1s round-trip per turn. The gate prompt says "YES by default" anyway.
-const GATE_LLM_THRESHOLD_CHARS = Number(process.env.GATE_LLM_THRESHOLD_CHARS || 8)
+// Above this many chars the gate skips the LLM YES/NO call and just replies
+// (fast path). Default 1 = effectively always fast-path: the wordless/sentinel +
+// confidence filters already drop noise, and the LLM gate added up to ~2.8s of
+// latency. Raise it only if the bot over-responds to filler.
+const GATE_LLM_THRESHOLD_CHARS = Number(process.env.GATE_LLM_THRESHOLD_CHARS || 1)
 const STAGE_TIMEOUT = {
   GATING: Number(process.env.GATE_TIMEOUT_GATING_MS || 5000),
   ANSWERING: Number(process.env.GATE_TIMEOUT_ANSWER_MS || 15000),
