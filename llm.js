@@ -75,7 +75,11 @@ export async function isAvailable() {
       // (so a recovered endpoint is re-selected) and only falls to local if it
       // is genuinely still down. Without this, one transient outage left the
       // cached-remote backend muting the bot until restart.
-      if (!ok && (b === providers || b === remote) && !FORCE_REMOTE) {
+      // Re-probe on ANY unavailable, including when cached on local: a network
+      // blip at boot can drop us to local, and if local is also down (no GGUF) we
+      // would otherwise stay 'offline' forever even after the remote tiers recover.
+      // Resetting re-tests the fast chain + chatjimmy from the top.
+      if (!ok && !FORCE_REMOTE && !FORCE_LOCAL) {
         console.warn('[llm] tier unavailable — re-probing (recovery or next tier)')
         providers.resetAvailability(); remote.resetAvailability()
         backendPromise = null
