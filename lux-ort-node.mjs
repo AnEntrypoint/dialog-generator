@@ -14,7 +14,7 @@ export async function createNodeSessions(dir, { int8 = true } = {}) {
   const cpuOpts = { executionProviders: ['cpu'], graphOptimizationLevel: 'all' }
   // fm_decoder is the bottleneck (4 NFE steps over the gen frames); LUX_FM_EP can
   // route it to a GPU EP (webgpu/dml) when that is faster. Encoder + vocos stay CPU.
-  const fmEps = (process.env.LUX_FM_EP || 'cpu').split(',')
+  const fmEps = (process.env.LUX_FM_EP || 'webgpu,cpu').split(',')
   const fmOpts = { executionProviders: fmEps, graphOptimizationLevel: 'all' }
   const textEncoder = await ort.InferenceSession.create(path.join(dir, te), cpuOpts)
   const fmDecoder = await ort.InferenceSession.create(path.join(dir, fm), fmOpts)

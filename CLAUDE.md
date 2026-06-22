@@ -186,6 +186,13 @@ ONNX pipeline that is ~3.3x faster than F5 (RTF ~1.15 vs ~3.8) because it runs o
 `lux-tts-bridge.js`; the F5 bridge below is retained for the GitHub-Pages web demo
 (no latency pressure there).
 
+**Speed / EP**: the fm_decoder (the 4-step bottleneck) runs **fp32 on the webgpu EP
+by default** (`LUX_INT8` unset, `LUX_FM_EP=webgpu,cpu`) -> synth ~1.4s for 3.6s of
+audio (RTF 0.40), vs ~4.2s for int8-on-CPU (2.9x faster). text_encoder + vocos stay
+CPU. CPU-only machines: set `LUX_INT8=1 LUX_FM_EP=cpu` (int8-on-CPU; fp32-on-CPU is
+slow). The zipvoice onnx export produces both fp32 (`fm_decoder.onnx`) and int8
+variants; the fp32 set is also on HF `YatharthS/LuxTTS`.
+
 - Core: `lux-core.mjs` (runtime-agnostic 4-step anchored flow-matching sampler,
   port of `zipvoice/onnx_modeling.py:sample`, verified vs torch to 8dp),
   `lux-ort-node.mjs` (onnxruntime-node factory), `lux-tokenizer.mjs` (espeak-IPA ->

@@ -44,7 +44,10 @@ const WIN = 1024
 const N_MELS = FEAT_DIM // 100
 
 const MODEL_DIR = process.env.LUX_MODEL_DIR || path.resolve('models/tts/lux')
-const USE_INT8 = process.env.LUX_INT8 !== '0' // int8 by default (5x smaller, CPU-fast)
+// fp32 by default: the fm_decoder runs ~2.9x faster on the webgpu EP as fp32
+// (synth 4.2s -> 1.4s, RTF 0.40) than int8 on CPU. CPU-only machines should set
+// LUX_INT8=1 LUX_FM_EP=cpu (int8-on-CPU; fp32-on-CPU is slow).
+const USE_INT8 = process.env.LUX_INT8 === '1'
 
 // Sampler dials (ZipVoice-distill defaults). numStep=4 is the whole point — the
 // distilled model is trained for 4-step sampling, so do not raise it expecting
