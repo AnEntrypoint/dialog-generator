@@ -7,11 +7,11 @@ import { resampleAudio } from './server-utils.mjs'
 
 const SAMPLE_RATE_DISCORD = 48000
 const SAMPLE_RATE_TTS_FALLBACK = 24000
-// Silence after the last word before the bot decides to reply. 600ms fired on
-// natural mid-thought pauses -> the gate answered a half-sentence, then the
-// continuation triggered a SECOND reply (the double-reply). 1100ms lets a normal
-// pause ride through so one utterance = one reply.
-const DEBOUNCE_MS = Number(process.env.GATE_DEBOUNCE_MS || 1100)
+// whisper-stream already fires ONCE per utterance (after its own 550ms end-of-
+// speech silence), so this gate debounce only needs to coalesce near-simultaneous
+// utterances, not wait out the pause again -- 1100ms here was ~1s of pure latency.
+// Pause tolerance lives in WHISPER_UTTERANCE_END_MS, not here.
+const DEBOUNCE_MS = Number(process.env.GATE_DEBOUNCE_MS || 250)
 // Skip the LLM gate call for messages that are clearly worth a reply — saves
 // ~1s round-trip per turn. The gate prompt says "YES by default" anyway.
 // Above this many chars the gate skips the LLM YES/NO call and just replies

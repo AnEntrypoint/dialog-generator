@@ -4,7 +4,7 @@ const SAMPLE_RATE = 48000
 // Time of no speech frames before we consider the utterance ended and fire
 // Whisper on the accumulated audio. Discord PCM arrives in 20ms frames; the
 // VAD drops sub-threshold frames. So "no frame for N ms" == "user paused N ms".
-const UTTERANCE_END_SILENCE_MS = Number(process.env.WHISPER_UTTERANCE_END_MS || 700)
+const UTTERANCE_END_SILENCE_MS = Number(process.env.WHISPER_UTTERANCE_END_MS || 550)
 // Minimum speech samples to bother transcribing. Below this it's a click or
 // throat-clear; Whisper hallucinates filler words on these.
 const MIN_UTTERANCE_SAMPLES = SAMPLE_RATE * Number(process.env.WHISPER_MIN_SECONDS || 0.4)
