@@ -21,7 +21,7 @@ const DEBOUNCE_MS = Number(process.env.GATE_DEBOUNCE_MS || 1100)
 const GATE_LLM_THRESHOLD_CHARS = Number(process.env.GATE_LLM_THRESHOLD_CHARS || 1)
 const STAGE_TIMEOUT = {
   GATING: Number(process.env.GATE_TIMEOUT_GATING_MS || 5000),
-  ANSWERING: Number(process.env.GATE_TIMEOUT_ANSWER_MS || 15000),
+  ANSWERING: Number(process.env.GATE_TIMEOUT_ANSWER_MS || 45000), // spans stream + synth + playback
   SPEAKING: Number(process.env.GATE_TIMEOUT_SPEAKING_MS || 30000),
 }
 const MAX_RESPONSE_CHARS = Number(process.env.GATE_MAX_RESPONSE_CHARS || 600)
@@ -91,7 +91,7 @@ function logTurn(h) {
 
 function snapHistory(role, text, username = null, meta = null) {
   if (!text) return
-  const entry = { role, username, text, timestamp: Date.now(), _meta: meta }
+  const entry = { role, username, text, timestamp: (meta && meta._ts) || Date.now(), _meta: meta }
   state.history.push(entry)
   if (role === 'bot') logTurn(entry)                       // bot turns are final on write
   // earlier turns are now superseded (final). The last entry may still be a
@@ -143,7 +143,7 @@ const transitions = {
   // isn't speaking yet, so new words don't abort (they're recorded for the next
   // turn). Without this, continuous channel chatter aborted every answer and the
   // bot never spoke. Barge-in resumes once SPEAKING emits audio.
-  ANSWERING: { onWhisperWord: () => {} },
+  ANSWERING: { onWhisperWord: () => {} }, // committed during LLM gen (no audio yet)
   SPEAKING:  { onWhisperWord: onSpeakingWhisper },
 }
 
@@ -215,16 +215,13 @@ const stageHandlers = {
       : ''
     const raw = await generateLLM(`${buildContext()}${multiHint}`, state.characterPrompt || undefined, abort.signal, { maxTokens: ANSWER_MAX_TOKENS })
     if (state.abort !== abort) return
-    const latencyMs = Date.now() - t0
-    state.metrics.lastAnswerMs = latencyMs
-    // Models often wrap the spoken line in quotes ("It's doin' alright"); strip a
-    // matched leading/trailing quote pair so it isn't read out or mis-synthesized.
+    state.metrics.lastAnswerMs = Date.now() - t0
     let text = (raw || '').trim()
     if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith('“') && text.endsWith('”'))) {
       text = text.slice(1, -1).trim()
     }
     text = text.slice(0, MAX_RESPONSE_CHARS)
-    console.log(`[gate] answer ${latencyMs}ms chars=${text.length} "${text.slice(0,40)}"`)
+    console.log(`[gate] answer ${state.metrics.lastAnswerMs}ms chars=${text.length} "${text.slice(0, 40)}"`)
     if (!text) { setState('LISTENING', 'empty answer'); return }
     state._pendingResponse = text
     runStage('SPEAKING')
@@ -283,6 +280,7 @@ const stageHandlers = {
           replyMs: (state._firstAudioAt && state._triggerHeardAt) ? state._firstAudioAt - state._triggerHeardAt : null,
           spokeForMs: state._firstAudioAt ? Date.now() - state._firstAudioAt : null,
           aborted: abort.signal.aborted,
+          _ts: state._firstAudioAt || undefined, // log the turn at when the bot started speaking
         })
         if (!abort.signal.aborted) state.metrics.spoken++
       }
