@@ -313,8 +313,11 @@ async function ensureModel() {
   if (loadPromise) return loadPromise
   loadPromise = (async () => {
     await tokenizer.loadVocab(path.join(MODEL_DIR, 'tokens.txt'))
-    sessions = await createNodeSessions(MODEL_DIR, { int8: USE_INT8, prec: process.env.LUX_PREC })
-    console.log(`[lux-tts] model loaded (${process.env.LUX_PREC || (USE_INT8 ? 'int8' : 'fp32')} sessions from ${MODEL_DIR})`)
+    // q4 by default: q4-on-webgpu synth ~931ms (RTF 0.31) vs fp32 ~1449ms, and 78MB
+    // vs 455MB. LUX_PREC=fp32 (quality fallback) or int8 (CPU) overrides.
+    const PREC = process.env.LUX_PREC || (USE_INT8 ? 'int8' : 'q4')
+    sessions = await createNodeSessions(MODEL_DIR, { int8: USE_INT8, prec: PREC })
+    console.log(`[lux-tts] model loaded (${PREC} sessions from ${MODEL_DIR})`)
   })()
   return loadPromise
 }
