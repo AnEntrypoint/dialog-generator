@@ -313,8 +313,8 @@ async function ensureModel() {
   if (loadPromise) return loadPromise
   loadPromise = (async () => {
     await tokenizer.loadVocab(path.join(MODEL_DIR, 'tokens.txt'))
-    sessions = await createNodeSessions(MODEL_DIR, { int8: USE_INT8 })
-    console.log(`[lux-tts] model loaded (${USE_INT8 ? 'int8' : 'fp32'} sessions from ${MODEL_DIR})`)
+    sessions = await createNodeSessions(MODEL_DIR, { int8: USE_INT8, prec: process.env.LUX_PREC })
+    console.log(`[lux-tts] model loaded (${process.env.LUX_PREC || (USE_INT8 ? 'int8' : 'fp32')} sessions from ${MODEL_DIR})`)
   })()
   return loadPromise
 }

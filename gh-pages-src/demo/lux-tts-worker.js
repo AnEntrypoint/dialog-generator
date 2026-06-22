@@ -107,15 +107,17 @@ async function loadModel() {
   status('loading tokenizer')
   tokensMap = await loadTokensUrl('./tokens.txt')
 
-  status('downloading models (int8 ~125 MB, first run)')
+  status('downloading models (q4 ~81 MB, first run)')
+  // q4 (MatMulNBits) HAS a WebGPU impl (unlike int8's MatMulInteger), so it is both
+  // smaller AND GPU-accelerated. Served as local Pages blobs (each < 99MB).
   const [teBytes, fmBytes, vocosBytes, vocosData] = await Promise.all([
-    fetchBytes(`${INT8_BASE}/text_encoder_int8.onnx`),
-    fetchBytes(`${INT8_BASE}/fm_decoder_int8.onnx`),
+    fetchBytes(`${LOCAL}/text_encoder_q4.onnx`),
+    fetchBytes(`${LOCAL}/fm_decoder_q4.onnx`),
     fetchBytes(`${LOCAL}/vocos.onnx`),
     fetchBytes(`${LOCAL}/vocos.onnx.data`),
   ])
 
-  status('initializing onnx sessions (wasm)')
+  status('initializing onnx sessions (webgpu)')
   // ort bundle + its wasm glue are co-located in ./ort/ (we import the bundle from
   // there), so the bundle loads the glue relative to itself -- no wasmPaths override
   // (setting './ort/' here double-prefixed it to ./ort/ort/).
@@ -125,10 +127,10 @@ async function loadModel() {
     fmDecoder: fmBytes,
     vocos: vocosBytes,
     vocosData,
-    ep: ['wasm'], // int8 MatMulInteger only on wasm; webgpu has no impl
+    ep: ['webgpu', 'wasm'], // q4 MatMulNBits runs on webgpu; wasm fallback
     onStatus: status,
   })
-  return 'wasm/int8'
+  return 'webgpu/q4'
 }
 
 async function loadVoice(name) {

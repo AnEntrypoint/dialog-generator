@@ -8,9 +8,11 @@ import { FEAT_DIM } from './lux-core.mjs'
 function scalarF32(v) { return new ort.Tensor('float32', Float32Array.from([v]), []) }
 function scalarI64(v) { return new ort.Tensor('int64', BigInt64Array.from([BigInt(v)]), []) }
 
-export async function createNodeSessions(dir, { int8 = true } = {}) {
-  const te = int8 ? 'text_encoder_int8.onnx' : 'text_encoder.onnx'
-  const fm = int8 ? 'fm_decoder_int8.onnx' : 'fm_decoder.onnx'
+export async function createNodeSessions(dir, { int8 = true, prec } = {}) {
+  // prec: 'fp32' | 'int8' | 'q4'. q4 (MatMulNBits) is webgpu-capable + small.
+  const suffix = prec === 'q4' ? '_q4' : prec === 'fp32' ? '' : (prec === 'int8' || int8) ? '_int8' : ''
+  const te = `text_encoder${suffix}.onnx`
+  const fm = `fm_decoder${suffix}.onnx`
   const cpuOpts = { executionProviders: ['cpu'], graphOptimizationLevel: 'all' }
   // fm_decoder is the bottleneck (4 NFE steps over the gen frames); LUX_FM_EP can
   // route it to a GPU EP (webgpu/dml) when that is faster. Encoder + vocos stay CPU.

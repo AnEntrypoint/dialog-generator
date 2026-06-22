@@ -25,3 +25,5 @@ models/llm/*.gguf filter=lfs diff=lfs merge=lfs -text
 # Local onnxruntime-web bundle (served same-origin for the COEP-blocked WASM EP)
 gh-pages-src/demo/ort/*.wasm !filter !diff !merge -text
 gh-pages-src/demo/ort/*.mjs !filter !diff !merge -text
+
+gh-pages-src/demo/model/lux/*_q4.onnx !filter !diff !merge -text
