@@ -27,7 +27,19 @@ const STAGE_TIMEOUT = {
 const MAX_RESPONSE_CHARS = Number(process.env.GATE_MAX_RESPONSE_CHARS || 600)
 // Token budget for the spoken reply. 50 cut responses off mid-sentence; allow a
 // normal sentence-or-two reply. TTS streams per sentence so length != huge delay.
+// Replies no longer truncate (the synth vocodes in windows), so allow a complete
+// natural turn; keep it modest for snappiness.
 const ANSWER_MAX_TOKENS = Number(process.env.GATE_ANSWER_MAX_TOKENS || 60)
+// Resolve after ms, or immediately when the signal aborts (so a barge-in still
+// interrupts the wait-for-playback in SPEAKING).
+function waitAbortable(ms, signal) {
+  return new Promise((resolve) => {
+    if (signal?.aborted) return resolve()
+    const t = setTimeout(() => { signal?.removeEventListener?.('abort', onAbort); resolve() }, ms)
+    const onAbort = () => { clearTimeout(t); resolve() }
+    signal?.addEventListener?.('abort', onAbort, { once: true })
+  })
+}
 // Whisper confidence floor. Below this the transcription is likely noise/cross-talk
 // garbled into real-looking words -> drop it rather than feed the LLM garbage.
 const MIN_CONFIDENCE = Number(process.env.GATE_MIN_CONFIDENCE || 0.30)
@@ -205,7 +217,13 @@ const stageHandlers = {
     if (state.abort !== abort) return
     const latencyMs = Date.now() - t0
     state.metrics.lastAnswerMs = latencyMs
-    const text = (raw || '').trim().slice(0, MAX_RESPONSE_CHARS)
+    // Models often wrap the spoken line in quotes ("It's doin' alright"); strip a
+    // matched leading/trailing quote pair so it isn't read out or mis-synthesized.
+    let text = (raw || '').trim()
+    if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith('“') && text.endsWith('”'))) {
+      text = text.slice(1, -1).trim()
+    }
+    text = text.slice(0, MAX_RESPONSE_CHARS)
     console.log(`[gate] answer ${latencyMs}ms chars=${text.length} "${text.slice(0,40)}"`)
     if (!text) { setState('LISTENING', 'empty answer'); return }
     state._pendingResponse = text
@@ -236,11 +254,22 @@ const stageHandlers = {
       const TTS_GAIN = Number(process.env.TTS_GAIN || 1.0) // lux is already normalized + clamped
       if (TTS_GAIN !== 1) for (let i = 0; i < out.length; i++) out[i] *= TTS_GAIN
       state.audioSink(out, text)
+      pushedSamples += out.length
       chunksPlayed++
       state._chunksPlayed = chunksPlayed
     }
+    let pushedSamples = 0
     try {
       await synthesizeStream(text, state.refPath, state.refText, onChunk, abort.signal)
+      // The audio is pushed instantly but STREAMS from the pump in real time after
+      // synth returns. Stay in SPEAKING until it has actually finished playing,
+      // otherwise the bot goes idle mid-playback and the tail gets cut. Abortable
+      // so a real barge-in still interrupts.
+      if (!abort.signal.aborted && pushedSamples > 0 && state._firstAudioAt) {
+        const playMs = (pushedSamples / SAMPLE_RATE_DISCORD) * 1000
+        const remain = playMs - (Date.now() - state._firstAudioAt)
+        if (remain > 0) await waitAbortable(remain, abort.signal)
+      }
     } finally {
       if (chunksPlayed > 0) {
         const words = text.split(/\s+/)

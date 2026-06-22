@@ -394,12 +394,25 @@ async function generateChunk(genText, signal) {
     seed: SEED,
   })
   if (signal?.aborted) return null
-  // Hard backstop: gen frames must fit the fixed vocos window.
-  const frames = Math.min(pred.frames, VOCOS_FRAMES)
-  if (pred.frames > VOCOS_FRAMES) {
-    console.warn(`[lux-tts] gen frames ${pred.frames} > ${VOCOS_FRAMES}; truncating (chunk too long)`)
+  // The vocos input is a fixed 768-frame window, but the fm_decoder produces the
+  // WHOLE utterance's frames in one pass. Vocode in 768-frame windows and stitch
+  // -> the full reply renders with no truncation, and the TEXT is never chunked.
+  let raw
+  if (pred.frames <= VOCOS_FRAMES) {
+    raw = await vocodeChunk(sessions, pred.data, pred.frames, refRms, 0.1)
+  } else {
+    const parts = []
+    for (let off = 0; off < pred.frames; off += VOCOS_FRAMES) {
+      if (signal?.aborted) return null
+      const n = Math.min(VOCOS_FRAMES, pred.frames - off)
+      const windowPred = pred.data.subarray(off * FEAT_DIM, (off + n) * FEAT_DIM)
+      parts.push(await vocodeChunk(sessions, windowPred, n, refRms, 0.1))
+    }
+    const total = parts.reduce((s, a) => s + a.length, 0)
+    raw = new Float32Array(total)
+    let o = 0
+    for (const p of parts) { raw.set(p, o); o += p.length }
   }
-  const raw = await vocodeChunk(sessions, pred.data, frames, refRms, 0.1)
   if (signal?.aborted) return null
   // vocodeChunk matches the reference clip's loudness, which for cleetus is very
   // quiet (peak ~0.035) -> inaudible in Discord. Normalize each chunk to an
@@ -413,21 +426,16 @@ async function generateChunk(genText, signal) {
   return audio
 }
 
+// No chunker: synthesize the WHOLE reply in one pass (lux reads up to the 768-frame
+// vocos window ~8s; fp32-on-webgpu makes that ~1.4s). One synth -> one contiguous
+// push -> the dispipe pump streams it. (generateChunk clamps gen frames to the
+// window, so an unusually long reply trims rather than splitting.)
 export async function synthesize(text, _refPath, _refText, signal) {
   if (!text) throw new Error('text required')
   await ensureModel()
   if (signal?.aborted) return null
-  const parts = []
-  for (const chunk of splitTextIntoChunks(text)) {
-    if (signal?.aborted) break
-    const audio = await generateChunk(chunk, signal)
-    if (audio) parts.push(audio)
-  }
-  if (!parts.length) return null
-  const total = parts.reduce((s, a) => s + a.length, 0)
-  const audio = new Float32Array(total)
-  let off = 0
-  for (const p of parts) { audio.set(p, off); off += p.length }
+  const audio = await generateChunk(text, signal)
+  if (!audio) return null
   return { audio, sampleRate: OUTPUT_RATE }
 }
 
@@ -435,11 +443,9 @@ export async function synthesizeStream(text, _refPath, _refText, onChunk, signal
   if (!text) throw new Error('text required')
   if (typeof onChunk !== 'function') throw new Error('onChunk required')
   await ensureModel()
-  for (const chunk of splitTextIntoChunks(text)) {
-    if (signal?.aborted) break
-    const audio = await generateChunk(chunk, signal)
-    if (audio && !signal?.aborted) onChunk(audio, OUTPUT_RATE)
-  }
+  if (signal?.aborted) return { sampleRate: OUTPUT_RATE }
+  const audio = await generateChunk(text, signal)
+  if (audio && !signal?.aborted) onChunk(audio, OUTPUT_RATE)
   return { sampleRate: OUTPUT_RATE }
 }
 
