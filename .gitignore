@@ -76,3 +76,7 @@ models/whisper/onnx-community/
 .tmp-f5/
 .gm/browser-profile/
 .gm/browser-profile-*/
+
+# LuxTTS browser: int8 models are fetched from HF at runtime; local copies are
+# test-only (?models=local) and exceed GitHub's per-file limit.
+gh-pages-src/demo/model/lux/*_int8.onnx

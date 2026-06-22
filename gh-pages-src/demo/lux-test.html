@@ -1,0 +1,48 @@
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>LuxTTS worker test</title></head>
+<body>
+<pre id="log">booting...</pre>
+<script type="module">
+  // Minimal harness to witness the LuxTTS worker on real onnxruntime-web.
+  // Exposes window.__luxResult = { samples, sampleRate, peak, finite, error }.
+  // Keeps only the LAST status string (not an array) so the main thread stays
+  // responsive under rapid model-download progress.
+  const SR = 48000 // lux-core SAMPLE_RATE
+  const w = new Worker('./lux-tts-worker.js?v=1&models=local', { type: 'module' })
+  window.__luxResult = { last: 'booting', voices: null, voiceLoaded: false, samples: 0, sampleRate: SR, peak: 0, finite: null, done: false, error: null, t0: performance.now() }
+  const el = document.getElementById('log')
+  w.onmessage = (e) => {
+    const m = e.data
+    if (m.type === 'status') window.__luxResult.last = m.status
+    else if (m.type === 'voices_loaded') {
+      window.__luxResult.voices = m.voices
+      window.__luxResult.last = 'voices:' + m.voices.join(',')
+      w.postMessage({ type: 'load_voice', voice: m.defaultVoice })
+    } else if (m.type === 'loaded') {
+      window.__luxResult.voiceLoaded = true
+      window.__luxResult.last = 'voice loaded, generating'
+      w.postMessage({ type: 'generate', data: { text: 'Hey, what is up. This is a test of the new voice.' } })
+    } else if (m.type === 'audio_chunk') {
+      const f = new Float32Array(m.data)
+      window.__luxResult.samples = f.length
+      let p = 0, finite = true
+      for (const v of f) { const a = Math.abs(v); if (a > p) p = a; if (!Number.isFinite(v)) finite = false }
+      window.__luxResult.peak = p
+      window.__luxResult.finite = finite
+      window.__luxResult.last = 'audio ' + f.length
+    } else if (m.type === 'stream_ended') {
+      window.__luxResult.done = true
+      window.__luxResult.ms = Math.round(performance.now() - window.__luxResult.t0)
+      window.__luxResult.last = 'done samples=' + window.__luxResult.samples + ' peak=' + window.__luxResult.peak.toFixed(3)
+    } else if (m.type === 'error') {
+      window.__luxResult.error = m.error
+      window.__luxResult.last = 'ERROR: ' + m.error
+    }
+    el.textContent = window.__luxResult.last
+  }
+  w.onerror = (e) => { window.__luxResult.error = String(e.message || e); el.textContent = 'workererr: ' + window.__luxResult.error }
+  w.postMessage({ type: 'load' })
+</script>
+</body>
+</html>

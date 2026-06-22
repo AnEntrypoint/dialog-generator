@@ -1,6 +1,14 @@
 import { setMouthOpen } from './vrm-viewer.js'
 
-const ttsWorker = new Worker('./tts-worker.js?v=8', { type: 'module' })
+// TTS engine select: LuxTTS (ZipVoice-distill, 48kHz) by default; F5-TTS (24kHz)
+// kept behind ?tts=f5. Each worker emits the SAME message protocol; only the
+// output sample rate differs, so TTS_SR follows the engine.
+const _ttsEngine = (() => {
+  try { return new URLSearchParams(self.location.search).get('tts') === 'f5' ? 'f5' : 'lux' } catch { return 'lux' }
+})()
+const TTS_SR = _ttsEngine === 'f5' ? 24000 : 48000
+const _workerUrl = _ttsEngine === 'f5' ? './tts-worker.js?v=8' : './lux-tts-worker.js?v=1'
+const ttsWorker = new Worker(_workerUrl, { type: 'module' })
 let ttsReady = false, ttsLoading = false
 let ttsReadyResolvers = [], ttsStreamResolve = null, ttsStreamReject = null
 let audioCtx = null, nextAt = 0, analyser = null, rafId = null
@@ -9,7 +17,7 @@ const $ = (id) => document.getElementById(id)
 
 function ensureAudioCtx() {
   if (!audioCtx || audioCtx.state === 'closed') {
-    audioCtx = new AudioContext({ sampleRate: 24000 })
+    audioCtx = new AudioContext({ sampleRate: TTS_SR })
     analyser = audioCtx.createAnalyser(); analyser.fftSize = 256
     analyser.connect(audioCtx.destination)
   }
@@ -17,14 +25,14 @@ function ensureAudioCtx() {
 }
 
 function scheduleChunk(pcm) {
-  const buf = audioCtx.createBuffer(1, pcm.length, 24000)
+  const buf = audioCtx.createBuffer(1, pcm.length, TTS_SR)
   buf.copyToChannel(pcm, 0)
   const src = audioCtx.createBufferSource()
   src.buffer = buf
   src.connect(analyser)
   const at = Math.max(nextAt, audioCtx.currentTime)
   src.start(at)
-  nextAt = at + pcm.length / 24000
+  nextAt = at + pcm.length / TTS_SR
   return src
 }
 

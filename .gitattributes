@@ -14,4 +14,14 @@ gh-pages-src/demo/model/onnx/*.part* !filter !diff !merge -text
 gh-pages-src/demo/model/tokenizer.json !filter !diff !merge -text
 gh-pages-src/demo/Cleetus.vrm !filter !diff !merge -text
 gh-pages-src/demo/voices/*.safetensors !filter !diff !merge -text
+# LuxTTS browser path: vocos ONNX + external weights served as raw Pages blobs
+# (both under GitHub's 100MB cap; text_encoder/fm_decoder int8 are fetched from HF
+# at runtime, not committed). luxmel ref is the precomputed reference mel.
+gh-pages-src/demo/model/lux/vocos.onnx !filter !diff !merge -text
+gh-pages-src/demo/model/lux/vocos.onnx.data !filter !diff !merge -text
+gh-pages-src/demo/voices/*.luxmel.f32 !filter !diff !merge -text
 models/llm/*.gguf filter=lfs diff=lfs merge=lfs -text
+
+# Local onnxruntime-web bundle (served same-origin for the COEP-blocked WASM EP)
+gh-pages-src/demo/ort/*.wasm !filter !diff !merge -text
+gh-pages-src/demo/ort/*.mjs !filter !diff !merge -text
