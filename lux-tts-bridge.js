@@ -77,8 +77,15 @@ const MAX_CHUNK_CHARS = Number(process.env.LUX_CHUNK_CHARS || 240)
 // can't stream a single pass, but a short first chunk's pass is quick -> first audio
 // ~1s instead of the whole-reply fm). Later chunks are larger (fewer fm passes =
 // less repeated reference-frame cost). Split at clause boundaries (natural pauses).
-const STREAM_FIRST_CHARS = Number(process.env.LUX_STREAM_FIRST_CHARS || 40)
-const STREAM_CHUNK_CHARS = Number(process.env.LUX_STREAM_CHUNK_CHARS || 160)
+// Gap-free streaming constraint: each chunk's SYNTH must finish before the PREVIOUS
+// chunk finishes PLAYING, else the pump underruns (audible skip). Per-chunk synth is
+// ref-overhead-dominated (~0.85s fixed) + ~0.3x its own duration, so a chunk must be
+// big enough that its playback exceeds the next chunk's synth. Live (under pump +
+// Discord contention) that floor is ~50 chars; the old 40-then-160 sizing made a
+// chunk's synth exceed the prior chunk's playback -> gaps. Keep them uniform + above
+// the floor; first chunk a touch smaller for a fast start that still covers chunk 2.
+const STREAM_FIRST_CHARS = Number(process.env.LUX_STREAM_FIRST_CHARS || 60)
+const STREAM_CHUNK_CHARS = Number(process.env.LUX_STREAM_CHUNK_CHARS || 100)
 function chunkForStreaming(text) {
   const t = (text || '').trim()
   if (!t) return []
