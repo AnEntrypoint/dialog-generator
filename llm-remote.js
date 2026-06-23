@@ -56,6 +56,11 @@ async function* streamChat(messages, model, signal, temperature) {
   signal?.addEventListener?.('abort', onAbort, { once: true })
   const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT_MS)
   try {
+    // chatjimmy honors ONLY selectedModel -- max_tokens, maxTokens, stop, and
+    // temperature are all ignored (witnessed: identical output regardless). So every
+    // caller must enforce length/format CLIENT-SIDE (the max*8 stream break below,
+    // capAtSentence in the gate, few-shot + lenient parsing for structured output).
+    // temperature is still sent for keyed providers that DO honor it.
     const r = await fetch(`${BASE}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },

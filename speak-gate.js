@@ -28,11 +28,26 @@ const STAGE_TIMEOUT = {
 }
 const MAX_RESPONSE_CHARS = Number(process.env.GATE_MAX_RESPONSE_CHARS || 600)
 const INTERRUPT_FRESH_MS = Number(process.env.GATE_INTERRUPT_FRESH_MS || 15000)
+
+// chatjimmy ignores max_tokens/stop/temperature (all witnessed), so the ONLY way to
+// bound its rambling is client-side. Cap to maxChars but at a CLEAN boundary: prefer
+// the last sentence ender within the cap, else the last whole word -- never mid-word.
+function capAtSentence(text, maxChars) {
+  const t = (text || '').trim()
+  if (t.length <= maxChars) return t
+  const head = t.slice(0, maxChars)
+  const sent = head.match(/[\s\S]*[.!?](?=\s|$)/)
+  if (sent && sent[0].trim().length > maxChars * 0.4) return sent[0].trim()
+  const sp = head.lastIndexOf(' ')
+  return (sp > 0 ? head.slice(0, sp) : head).trim()
+}
 // Token budget for the spoken reply. 50 cut responses off mid-sentence; allow a
 // normal sentence-or-two reply. TTS streams per sentence so length != huge delay.
 // Replies no longer truncate (the synth vocodes in windows), so allow a complete
 // natural turn; keep it modest for snappiness.
-const ANSWER_MAX_TOKENS = Number(process.env.GATE_ANSWER_MAX_TOKENS || 60)
+// Sized so llm-remote's stream break (maxTokens*8 chars) lands ABOVE MAX_RESPONSE_CHARS,
+// leaving capAtSentence (clean sentence boundary) as the binding limit, not a mid-word cut.
+const ANSWER_MAX_TOKENS = Number(process.env.GATE_ANSWER_MAX_TOKENS || 90)
 // Resolve after ms, or immediately when the signal aborts (so a barge-in still
 // interrupts the wait-for-playback in SPEAKING).
 function waitAbortable(ms, signal) {
@@ -248,7 +263,7 @@ const stageHandlers = {
     if ((text.startsWith('"') && text.endsWith('"')) || (text.startsWith('“') && text.endsWith('”'))) {
       text = text.slice(1, -1).trim()
     }
-    text = text.slice(0, MAX_RESPONSE_CHARS)
+    text = capAtSentence(text, MAX_RESPONSE_CHARS)
     console.log(`[gate] answer ${state.metrics.lastAnswerMs}ms chars=${text.length} "${text.slice(0, 40)}"`)
     if (!text) { setState('LISTENING', 'empty answer'); return }
     state._pendingResponse = text
