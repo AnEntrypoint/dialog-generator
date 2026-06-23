@@ -1,4 +1,4 @@
-import { generate as generateLLM, isAvailable as isLLMAvailable, buildGrammar } from './llm.js'
+import { generate as generateLLM, isAvailable as isLLMAvailable } from './llm.js'
 // LuxTTS (ZipVoice-distill, 4-step) replaces F5 — ~3x faster, already 48kHz so
 // the resampleAudio(audio, 48000, 48000) below is a no-op (ratio 1).
 import { synthesizeStream, setRefVoice as _setRefVoice } from './lux-tts-bridge.js'
@@ -21,7 +21,6 @@ const DEBOUNCE_MS = Number(process.env.GATE_DEBOUNCE_MS || 0)
 // (fast path). Default 1 = effectively always fast-path: the wordless/sentinel +
 // confidence filters already drop noise, and the LLM gate added up to ~2.8s of
 // latency. Raise it only if the bot over-responds to filler.
-const GATE_LLM_THRESHOLD_CHARS = Number(process.env.GATE_LLM_THRESHOLD_CHARS || 1)
 const STAGE_TIMEOUT = {
   GATING: Number(process.env.GATE_TIMEOUT_GATING_MS || 5000),
   ANSWERING: Number(process.env.GATE_TIMEOUT_ANSWER_MS || 45000), // spans stream + synth + playback
@@ -45,22 +44,29 @@ function waitAbortable(ms, signal) {
 }
 // Whisper confidence floor. Below this the transcription is likely noise/cross-talk
 // garbled into real-looking words -> drop it rather than feed the LLM garbage.
-const MIN_CONFIDENCE = Number(process.env.GATE_MIN_CONFIDENCE || 0.30)
 const MAX_HISTORY = 12
 
-const GATE_PROMPT = [
-  'You decide whether the bot should speak now. Read the recent conversation. The user just stopped talking.',
-  'Reply YES by default — the bot is conversational and should join in. Lean YES whenever the user said anything substantive, asked a question, addressed the bot, used the bot\'s name, or made a remark worth reacting to.',
-  'Reply NO only when the user clearly addressed someone else by name, was obviously mid-sentence with no pause, said something trivial like a single filler word, or the bot already replied to this exact thing.',
-  'Output only YES or NO.',
+// Stage-1 system prompt: the LLM reads a noisy speech-to-text line, recovers the
+// real words, and gates in one shot. Few-shot examples make a small model emit the
+// RESPOND:/IGNORE marker reliably (a plain instruction made it ramble/restate).
+const STAGE1_SYS = [
+  'You clean up a noisy speech-to-text feed for a gas-station attendant. Each "mic:" line is what a microphone THOUGHT it heard -- often garbled, clipped, or mishearing words. Reply with exactly one of:',
+  'RESPOND: <the real words, cleaned up> -- when it is genuine speech a person aimed at the attendant',
+  'IGNORE -- when it is only noise, a broken half-fragment, or the attendant\'s own previous line echoing back',
+  'Never explain, never add anything else.',
+  '',
+  'mic: "[BLANK_AUDIO]"',
+  'IGNORE',
+  'mic: "wzzt krr mmh the"',
+  'IGNORE',
+  'mic: "hey you got any cold pop in there"',
+  'RESPOND: hey, you got any cold pop in there?',
+  'mic: "Zedadimani Reesana cooler"',
+  'IGNORE',
+  'mic: "howmuch fer the premium"',
+  'RESPOND: how much for the premium?',
 ].join('\n')
-
-let yesNoGrammar = null
-async function getYesNoGrammar() {
-  if (yesNoGrammar) return yesNoGrammar
-  yesNoGrammar = await buildGrammar('root ::= "YES" | "NO"')
-  return yesNoGrammar
-}
+const STAGE1_TEMP = Number(process.env.GATE_STAGE1_TEMP || 0)
 
 const state = {
   name: 'LISTENING', enteredAt: Date.now(), debounceTimer: null, abort: null,
@@ -183,31 +189,41 @@ const stageHandlers = {
       return
     }
 
-    // Fast-path: skip the LLM gate call for clearly substantive messages.
-    // The gate prompt itself says "YES by default" — a separate ~1s round-trip
-    // per turn just to confirm that is wasteful. Only ask the LLM when the
-    // message is short enough to be plausibly a filler ("yeah", "hm", "ok").
-    const lastUserText = (last.text || '').trim()
-    if (lastUserText.length >= GATE_LLM_THRESHOLD_CHARS) {
-      const t = Date.now() - state.enteredAt
-      state.lastDecision = { decision: 'YES', at: Date.now(), source: 'fastpath', latencyMs: t }
-      state.metrics.gateYes++
-      console.log(`[gate] decision=YES (fastpath, chars=${lastUserText.length}, ${t}ms)`)
-      runStage('ANSWERING')
-      return
-    }
-
+    // Stage 1: hand the LLM the noisy STT line + recent context. It recovers the
+    // real words AND gates in one call -- RESPOND:<cleaned> to reply, IGNORE for
+    // noise/echo/not-for-you. This subsumes the old fastpath + YES/NO gate + the
+    // confidence + self-echo filters: garbled input is corrected, echoes ignored.
+    const raw = (last.text || '').trim()
+    // NO conversation context in stage-1: any prior text (even the bot's own last
+    // line as an "echo hint") anchors the small model and it cleans the mic line
+    // TOWARD that text -- "what's on special" became "we'll get a new Honda" after a
+    // car-talk turn. The user turn is exactly `mic: "X"` to match the few-shot, and
+    // echo is handled upstream by the discord-vad bot-speaking mask.
     const t0 = Date.now()
-    const grammar = await getYesNoGrammar()
-    const raw = await generateLLM(`${buildContext()}\n\n${GATE_PROMPT}\n\nDecision:`, state.characterPrompt || undefined, abort.signal, { grammar, maxTokens: 4 })
+    const out = (await generateLLM(
+      `mic: "${raw}"`,
+      STAGE1_SYS, abort.signal, { maxTokens: 50, temperature: STAGE1_TEMP },
+    ) || '').trim()
     if (state.abort !== abort) return
     const latencyMs = Date.now() - t0
-    const decision = (raw || '').trim().toUpperCase().startsWith('Y') ? 'YES' : 'NO'
-    state.lastDecision = { decision, at: Date.now(), source: 'llm', latencyMs }
+    const ignore = /^\s*ignore\b/i.test(out) || /\bignore\s*$/i.test(out)
+    const decision = ignore ? 'NO' : 'YES'
+    state.lastDecision = { decision, at: Date.now(), source: 'interpret', latencyMs }
     state.metrics[decision === 'YES' ? 'gateYes' : 'gateNo']++
-    console.log(`[gate] decision=${decision} (llm ${latencyMs}ms) raw="${(raw || '').slice(0, 20)}"`)
-    if (decision === 'YES') runStage('ANSWERING')
-    else setState('LISTENING', 'gate=NO')
+    console.log(`[gate] interpret=${decision} (${latencyMs}ms) "${out.slice(0, 50)}"`)
+    if (ignore) { setState('LISTENING', 'interpret=IGNORE'); return }
+    // The gate decision (RESPOND vs IGNORE) is the reliable part of stage-1 and that
+    // is what we use -- the bot answers the RAW words. Applying stage-1's CLEANED text
+    // is OFF by default (GATE_USE_CLEANED=1): on chatjimmy it is right ~80% but
+    // hallucinates plausible-but-wrong corrections ~20% (carrying the RESPOND marker,
+    // so undetectable), which would regress the common clear-input case. With a
+    // stronger keyed LLM the cleaning is safe to enable.
+    if (process.env.GATE_USE_CLEANED === '1') {
+      const m = out.match(/respond:\s*([\s\S]+)/i)
+      const cleaned = m ? m[1].trim().replace(/^["'“]|["'”]$/g, '').trim() : ''
+      if (cleaned) { last.text = cleaned; console.log(`[gate] cleaned="${cleaned.slice(0, 50)}"`) }
+    }
+    runStage('ANSWERING')
   },
   ANSWERING: async (abort) => {
     const t0 = Date.now()
@@ -310,28 +326,12 @@ function isWordlessOrSentinel(text) {
 // is the bot's own voice coming back through open speakers, not a new utterance.
 // Stops the bot replying to itself AND stops it aborting its own sentence.
 const ECHO_TAIL_MS = Number(process.env.GATE_ECHO_TAIL_MS || 2500)
-const ECHO_OVERLAP = Number(process.env.GATE_ECHO_OVERLAP || 0.5)
 function wordSet(text) { return new Set((text || '').toLowerCase().match(/[a-z0-9']+/g) || []) }
-function isBotEcho(text) {
-  if (!state._echoActiveUntil || Date.now() > state._echoActiveUntil) return false
-  if (!state._botSpeechWords || !state._botSpeechWords.size) return false
-  const w = (text || '').toLowerCase().match(/[a-z0-9']+/g) || []
-  if (!w.length) return false
-  let hit = 0
-  for (const tok of w) if (state._botSpeechWords.has(tok)) hit++
-  return hit / w.length >= ECHO_OVERLAP
-}
-
-export function noteWhisperWord({ userId, username, text, confidence }) {
+export function noteWhisperWord({ userId, username, text }) {
   if (isWordlessOrSentinel(text)) return
-  // Drop low-confidence transcriptions: whisper turns noise/cross-talk/echo into
-  // confident-looking gibberish ("Zedadimani and Reesana") that then pollutes the
-  // context so the bot replies to it. A floor keeps that garbage out of history.
-  if (confidence != null && confidence < MIN_CONFIDENCE) {
-    console.log(`[gate] dropped low-conf (${confidence.toFixed(2)}): "${text.slice(0, 50)}"`)
-    return
-  }
-  if (isBotEcho(text)) { console.log(`[gate] dropped self-echo: "${text.slice(0, 50)}"`); return }
+  // No confidence floor or echo filter here anymore: stage-1 of the gate reads the
+  // raw (lossy) line + context and IGNOREs garble/echo/not-for-you itself, while the
+  // discord-vad bot-speaking mask already drops most acoustic loopback upstream.
   state.lastWhisperAt = Date.now()
   state.activeSpeakers.set(userId, { username, lastWordAt: state.lastWhisperAt, lastText: text })
   const last = state.history[state.history.length - 1]

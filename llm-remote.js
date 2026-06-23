@@ -50,7 +50,7 @@ function applyGrammar(text, grammar) {
   return alts[0]
 }
 
-async function* streamChat(messages, model, signal) {
+async function* streamChat(messages, model, signal, temperature) {
   const ctrl = new AbortController()
   const onAbort = () => ctrl.abort()
   signal?.addEventListener?.('abort', onAbort, { once: true })
@@ -59,7 +59,7 @@ async function* streamChat(messages, model, signal) {
     const r = await fetch(`${BASE}/api/chat`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ messages, chatOptions: { selectedModel: model } }),
+      body: JSON.stringify({ messages, chatOptions: { selectedModel: model, ...(temperature != null ? { temperature } : {}) } }),
       signal: ctrl.signal,
     })
     if (!r.ok) {
@@ -116,7 +116,7 @@ export async function generate(prompt, system = 'You are a helpful assistant. Be
   const max = Number(extraOpts.maxTokens) || 0
   let out = ''
   try {
-    for await (const chunk of streamChat(buildMessages(prompt, system), model, signal)) {
+    for await (const chunk of streamChat(buildMessages(prompt, system), model, signal, extraOpts.temperature)) {
       out += chunk
       if (max && out.length > max * 8) break
     }

@@ -85,7 +85,7 @@ const MAX_CHUNK_CHARS = Number(process.env.LUX_CHUNK_CHARS || 240)
 // chunk's synth exceed the prior chunk's playback -> gaps. Keep them uniform + above
 // the floor; first chunk a touch smaller for a fast start that still covers chunk 2.
 const STREAM_FIRST_CHARS = Number(process.env.LUX_STREAM_FIRST_CHARS || 60)
-const STREAM_CHUNK_CHARS = Number(process.env.LUX_STREAM_CHUNK_CHARS || 100)
+const STREAM_CHUNK_CHARS = Number(process.env.LUX_STREAM_CHUNK_CHARS || 80)
 function chunkForStreaming(text) {
   const t = (text || '').trim()
   if (!t) return []
