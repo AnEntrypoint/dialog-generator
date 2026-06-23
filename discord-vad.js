@@ -7,7 +7,14 @@ const ACTIVE_RMS = Number(process.env.VAD_ACTIVE_RMS || 0.003)
 // Barge-in: raw mic energy this loud DURING bot speech = the listener talking over
 // the bot (with headphones there is no loopback, so it can only be them). Well above
 // residual room noise so the bot does not cut itself. Tunable.
-const BARGE_IN_RMS = Number(process.env.VAD_BARGE_IN_RMS || 0.02)
+const BARGE_IN_RMS = Number(process.env.VAD_BARGE_IN_RMS || 0.05)
+// Barge-in needs SUSTAINED speech, not one transient frame -- a click/echo tail/brief
+// noise should never cut the bot. Require this many ms of continuous loud audio, and
+// ignore the first GRACE ms of the bot's reply (its own onset / room settling).
+const BARGE_SUSTAIN_MS = Number(process.env.VAD_BARGE_SUSTAIN_MS || 200)
+const BARGE_GRACE_MS = Number(process.env.VAD_BARGE_GRACE_MS || 500)
+let _bargeRunMs = 0
+let _botSpeakStartAt = 0
 const TARGET_RMS = 0.15
 const MAX_GAIN = 25
 const MIN_GAIN = 1
@@ -68,6 +75,7 @@ export function init(processingQueue, lastErrorRef) {
         stereo[i * 2] = c; stereo[i * 2 + 1] = c
       }
       const durMs = (monoChunk.length / SAMPLE_RATE) * 1000
+      if (_botSpeakingUntil < Date.now()) { _botSpeakStartAt = Date.now(); _bargeRunMs = 0 } // new reply
       const base = Math.max(_botSpeakingUntil, Date.now())
       _botSpeakingUntil = base + durMs + BOT_SPEAK_TAIL_MS
       pushAudioFrame(stereo)
@@ -137,13 +145,22 @@ export function onPcmChunk(userId, stereoF32) {
     f32[i] = v > 1 ? 1 : v < -1 ? -1 : v
   }
 
-  // Barge-in: the listener is talking over the bot -> cut it NOW (flush the queued
-  // audio + abort SPEAKING) and let this utterance through to whisper.
-  if (botSpeaking && rawRms > BARGE_IN_RMS) {
-    _botSpeakingUntil = 0
-    try { flushAudio() } catch {}
-    try { speakGate.bargeIn() } catch (e) { console.error('[vad] bargeIn err:', e.message) }
-    console.log(`[vad] BARGE-IN (rms=${rawRms.toFixed(3)})`)
+  // Barge-in: only when the listener is SUSTAINING speech over the bot -- accumulate
+  // continuous loud time, reset on any quiet frame, and ignore the reply's first
+  // GRACE ms. A single transient frame no longer cuts the bot.
+  if (botSpeaking && now - _botSpeakStartAt > BARGE_GRACE_MS) {
+    if (rawRms > BARGE_IN_RMS) {
+      _bargeRunMs += (monoLen / SAMPLE_RATE) * 1000
+      if (_bargeRunMs >= BARGE_SUSTAIN_MS) {
+        _bargeRunMs = 0
+        _botSpeakingUntil = 0
+        try { flushAudio() } catch {}
+        try { speakGate.bargeIn() } catch (e) { console.error('[vad] bargeIn err:', e.message) }
+        console.log(`[vad] BARGE-IN sustained (rms=${rawRms.toFixed(3)})`)
+      }
+    } else {
+      _bargeRunMs = 0
+    }
   }
   if (now < _botSpeakingUntil || rawRms < ACTIVE_RMS) {
     _skippedFrames.set(userId, (_skippedFrames.get(userId) || 0) + 1)

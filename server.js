@@ -265,9 +265,12 @@ app.post('/api/discord/test/bargein', async (req, res) => {
     // into the vad (which fires the barge-in path during bot speech).
     const vad = await import('./discord-vad.js')
     const N = 960
-    const stereo = new Float32Array(N * 2)
-    for (let i = 0; i < N; i++) { const v = Math.sin(i * 0.2) * 0.3; stereo[i * 2] = v; stereo[i * 2 + 1] = v }
-    vad.onPcmChunk('barger', stereo)
+    const frames = Number(req.body?.frames) || 12 // ~240ms sustained by default
+    for (let f = 0; f < frames; f++) {
+      const stereo = new Float32Array(N * 2)
+      for (let i = 0; i < N; i++) { const v = Math.sin(i * 0.2) * 0.3; stereo[i * 2] = v; stereo[i * 2 + 1] = v }
+      vad.onPcmChunk('barger', stereo)
+    }
     const sg = await import('./speak-gate.js')
     res.json({ success: true, state: sg.getDebugSnapshot().state })
   } catch (err) {
