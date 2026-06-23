@@ -85,7 +85,10 @@ const MAX_CHUNK_CHARS = Number(process.env.LUX_CHUNK_CHARS || 240)
 // chunk's synth exceed the prior chunk's playback -> gaps. Keep them uniform + above
 // the floor; first chunk a touch smaller for a fast start that still covers chunk 2.
 const STREAM_FIRST_CHARS = Number(process.env.LUX_STREAM_FIRST_CHARS || 60)
-const STREAM_CHUNK_CHARS = Number(process.env.LUX_STREAM_CHUNK_CHARS || 80)
+const STREAM_CHUNK_CHARS = Number(process.env.LUX_STREAM_CHUNK_CHARS || 110)
+// Silence padded onto each streamed chunk so the inter-chunk boundary has a natural
+// inter-sentence pause instead of an abrupt, rushed 'skip ahead'.
+const CHUNK_PAUSE_MS = Number(process.env.LUX_CHUNK_PAUSE_MS || 160)
 function chunkForStreaming(text) {
   const t = (text || '').trim()
   if (!t) return []
@@ -494,10 +497,19 @@ export async function synthesizeStream(text, _refPath, _refText, onChunk, signal
   // q4-webgpu (RTF ~0.3) synthesizes chunk N+1 before chunk N finishes playing, so
   // the dispipe pump streams them as one continuous voice. (The fm is non-causal so
   // a single whole-reply pass can't stream -- chunking is what unlocks the fast start.)
+  // Each chunk is synthesized standalone, so it ends abruptly (~tens of ms of tail)
+  // instead of the ~250ms a speaker leaves between sentences. Played back-to-back the
+  // boundaries sound RUSHED -- the listener hears it 'skip ahead'. Restore a natural
+  // pause by padding a bit of silence onto each chunk.
+  const pauseSamples = Math.max(0, Math.round(OUTPUT_RATE * (CHUNK_PAUSE_MS / 1000)))
   for (const chunk of chunkForStreaming(text)) {
     if (signal?.aborted) break
     const audio = await generateChunk(chunk, signal)
-    if (audio && !signal?.aborted) onChunk(audio, OUTPUT_RATE)
+    if (audio && !signal?.aborted) {
+      const out = pauseSamples ? new Float32Array(audio.length + pauseSamples) : audio
+      if (pauseSamples) out.set(audio, 0) // trailing samples default to 0 = silence
+      onChunk(out, OUTPUT_RATE)
+    }
   }
   return { sampleRate: OUTPUT_RATE }
 }
