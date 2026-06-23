@@ -259,6 +259,23 @@ app.post('/api/discord/test/utterance', async (req, res) => {
   }
 })
 
+app.post('/api/discord/test/bargein', async (req, res) => {
+  try {
+    // Simulate the listener talking over the bot: push a loud synthetic PCM frame
+    // into the vad (which fires the barge-in path during bot speech).
+    const vad = await import('./discord-vad.js')
+    const N = 960
+    const stereo = new Float32Array(N * 2)
+    for (let i = 0; i < N; i++) { const v = Math.sin(i * 0.2) * 0.3; stereo[i * 2] = v; stereo[i * 2 + 1] = v }
+    vad.onPcmChunk('barger', stereo)
+    const sg = await import('./speak-gate.js')
+    res.json({ success: true, state: sg.getDebugSnapshot().state })
+  } catch (err) {
+    console.error('[api] test bargein error:', err)
+    res.status(500).json({ error: err.message })
+  }
+})
+
 app.post('/api/discord/message', async (req, res) => {
   if (!sendMessage) return res.status(503).json({ error: 'Discord not enabled' })
   try {

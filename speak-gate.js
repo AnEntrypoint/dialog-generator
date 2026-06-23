@@ -27,6 +27,7 @@ const STAGE_TIMEOUT = {
   SPEAKING: Number(process.env.GATE_TIMEOUT_SPEAKING_MS || 30000),
 }
 const MAX_RESPONSE_CHARS = Number(process.env.GATE_MAX_RESPONSE_CHARS || 600)
+const INTERRUPT_FRESH_MS = Number(process.env.GATE_INTERRUPT_FRESH_MS || 15000)
 // Token budget for the spoken reply. 50 cut responses off mid-sentence; allow a
 // normal sentence-or-two reply. TTS streams per sentence so length != huge delay.
 // Replies no longer truncate (the synth vocodes in windows), so allow a complete
@@ -232,7 +233,15 @@ const stageHandlers = {
     const multiHint = recent.length >= 2
       ? `\n\nMultiple people just spoke at the same time: ${recent.map(s => s.username).join(' and ')}. Address both in your one reply.`
       : ''
-    const raw = await generateLLM(`${buildContext()}${multiHint}`, state.characterPrompt || undefined, abort.signal, { maxTokens: ANSWER_MAX_TOKENS })
+    // If a barge-in just cut the bot off, hand the LLM both halves so it segues
+    // naturally -- pick the interrupted thread back up if they were asking for it,
+    // or go with the new thing -- instead of restarting cold.
+    const intr = (state._interrupted && now - state._interrupted.at < INTERRUPT_FRESH_MS) ? state._interrupted : null
+    state._interrupted = null
+    const interruptHint = intr
+      ? `\n\nYou got cut off mid-sentence -- you'd just said: "${intr.spoken}". They talked over you (their words are the last line above). If they were asking you to repeat or finish that, pick it right back up; if it's something new, go with that. Either way lead in like you were interrupted (a quick "oh-" / "right, so-" / "anyway-"), don't restart cold.`
+      : ''
+    const raw = await generateLLM(`${buildContext()}${multiHint}${interruptHint}`, state.characterPrompt || undefined, abort.signal, { maxTokens: ANSWER_MAX_TOKENS })
     if (state.abort !== abort) return
     state.metrics.lastAnswerMs = Date.now() - t0
     let text = (raw || '').trim()
@@ -249,6 +258,7 @@ const stageHandlers = {
     const text = state._pendingResponse || ''
     state._pendingResponse = null
     if (!text) { setState('LISTENING', 'no text'); return }
+    state._speakingText = text                   // so bargeIn() can compute spoken-so-far
     state._botSpeechWords = wordSet(text)        // for the self-echo content filter
     let chunksPlayed = 0
     state._chunksPlayed = 0
@@ -351,6 +361,22 @@ export function setRefVoice(refPath, refText) {
 }
 export function setCharacterCardPrompt(prompt) { state.characterPrompt = prompt }
 export function setAudioSink(fn) { state.audioSink = fn }
+
+// Barge-in: the listener started talking over the bot. The caller (discord-vad) has
+// already flushed the audio queue for an instant cut; here we abort the in-flight
+// SPEAKING and remember what got interrupted so the NEXT answer can segue (continue
+// or move on). No-op unless audio was actually playing.
+export function bargeIn() {
+  if (state.name !== 'SPEAKING' || !state._chunksPlayed) return false
+  const text = state._speakingText || ''
+  const words = text.split(/\s+/)
+  const cp = state._chunksPlayed
+  const spoken = words.slice(0, Math.max(1, Math.floor(words.length * (cp / (cp + 2))))).join(' ')
+  state._interrupted = { spoken, intended: text, at: Date.now() }
+  console.log(`[gate] BARGE-IN cut after "${spoken.slice(0, 40)}"`)
+  abortCurrent('barge-in')
+  return true
+}
 export function clearHistory() { state.history.length = 0; console.log('[gate] history cleared') }
 
 // Directly synthesize `text` (F5-TTS) and push it through the active audio sink
@@ -387,4 +413,4 @@ export function getDebugSnapshot() {
   }
 }
 
-export default { noteWhisperWord, setRefVoice, setCharacterCardPrompt, setAudioSink, clearHistory, getDebugSnapshot }
+export default { noteWhisperWord, setRefVoice, setCharacterCardPrompt, setAudioSink, bargeIn, clearHistory, getDebugSnapshot }

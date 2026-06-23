@@ -1,9 +1,13 @@
-import { pushAudioFrame } from 'dispipe/voice'
+import { pushAudioFrame, flushAudio } from 'dispipe/voice'
 import { pushFrame, onPartial, onStable } from './whisper-stream.js'
 import * as speakGate from './speak-gate.js'
 
 const SAMPLE_RATE = 48000
 const ACTIVE_RMS = Number(process.env.VAD_ACTIVE_RMS || 0.003)
+// Barge-in: raw mic energy this loud DURING bot speech = the listener talking over
+// the bot (with headphones there is no loopback, so it can only be them). Well above
+// residual room noise so the bot does not cut itself. Tunable.
+const BARGE_IN_RMS = Number(process.env.VAD_BARGE_IN_RMS || 0.02)
 const TARGET_RMS = 0.15
 const MAX_GAIN = 25
 const MIN_GAIN = 1
@@ -133,7 +137,15 @@ export function onPcmChunk(userId, stereoF32) {
     f32[i] = v > 1 ? 1 : v < -1 ? -1 : v
   }
 
-  if (botSpeaking || rawRms < ACTIVE_RMS) {
+  // Barge-in: the listener is talking over the bot -> cut it NOW (flush the queued
+  // audio + abort SPEAKING) and let this utterance through to whisper.
+  if (botSpeaking && rawRms > BARGE_IN_RMS) {
+    _botSpeakingUntil = 0
+    try { flushAudio() } catch {}
+    try { speakGate.bargeIn() } catch (e) { console.error('[vad] bargeIn err:', e.message) }
+    console.log(`[vad] BARGE-IN (rms=${rawRms.toFixed(3)})`)
+  }
+  if (now < _botSpeakingUntil || rawRms < ACTIVE_RMS) {
     _skippedFrames.set(userId, (_skippedFrames.get(userId) || 0) + 1)
     return
   }
