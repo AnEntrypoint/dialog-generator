@@ -1,13 +1,6 @@
 import { transcribe } from './discord-whisper.js'
 
 const SAMPLE_RATE = 48000
-// Time of no speech frames before we consider the utterance ended and fire
-// Whisper on the accumulated audio. Discord PCM arrives in 20ms frames; the
-// VAD drops sub-threshold frames. So "no frame for N ms" == "user paused N ms".
-const UTTERANCE_END_SILENCE_MS = Number(process.env.WHISPER_UTTERANCE_END_MS || 550)
-// Minimum speech samples to bother transcribing. Below this it's a click or
-// throat-clear; Whisper hallucinates filler words on these.
-const MIN_UTTERANCE_SAMPLES = SAMPLE_RATE * Number(process.env.WHISPER_MIN_SECONDS || 0.4)
 // Maximum utterance length before forcing a transcribe even without silence.
 // Prevents unbounded buffering during a long monologue.
 const MAX_UTTERANCE_SECONDS = Number(process.env.WHISPER_MAX_SECONDS || 20)
@@ -16,6 +9,9 @@ const MAX_UTTERANCE_SECONDS = Number(process.env.WHISPER_MAX_SECONDS || 20)
 // confuses it and triggers hallucinated end-of-sentence tokens.
 const SILENCE_PAD_MS = Number(process.env.WHISPER_SILENCE_PAD_MS || 200)
 const MIN_WORDS_TO_FIRE = Number(process.env.WHISPER_MIN_WORDS || 1)
+// Minimum speech samples to bother transcribing. Below this it's a click or
+// throat-clear; Whisper hallucinates filler words on these.
+const MIN_UTTERANCE_SAMPLES = SAMPLE_RATE * Number(process.env.WHISPER_MIN_SECONDS || 0.4)
 
 const sessions = new Map()
 
@@ -26,12 +22,12 @@ function getSession(userId) {
       totalSamples: 0,
       lastFrameAt: 0,
       inFlight: false,
-      endTimer: null,
       latestText: '',
       latestConf: 0,
       listeners: [],
       stableListeners: [],
       lastFiredText: '',
+      generation: 0,       // incremented on clear() — stale results are dropped
     })
   }
   return sessions.get(userId)
@@ -59,17 +55,9 @@ function wordCount(text) {
   return text.trim().split(/\s+/).filter(Boolean).length
 }
 
-function scheduleUtteranceEnd(userId) {
-  const s = sessions.get(userId)
-  if (!s) return
-  if (s.endTimer) clearTimeout(s.endTimer)
-  s.endTimer = setTimeout(() => endUtterance(userId), UTTERANCE_END_SILENCE_MS)
-}
-
 async function endUtterance(userId) {
   const s = sessions.get(userId)
   if (!s) return
-  s.endTimer = null
   if (s.inFlight) return                              // already transcribing this user
   if (s.totalSamples < MIN_UTTERANCE_SAMPLES) {       // too short — discard
     if (s.totalSamples > 0) {
@@ -78,6 +66,7 @@ async function endUtterance(userId) {
     s.chunks = []; s.totalSamples = 0
     return
   }
+  const gen = s.generation
   s.inFlight = true
   const samples = s.totalSamples
   // Merge speech frames + add silence padding so Whisper sees natural audio
@@ -89,6 +78,12 @@ async function endUtterance(userId) {
   const t0 = Date.now()
   try {
     const result = await transcribe(merged, SAMPLE_RATE)
+    // Stale check: if clear() was called while this transcription was in flight,
+    // the generation counter won't match — drop the result.
+    if (s.generation !== gen) {
+      console.log(`[stream] uid=${userId} dropping stale transcription (gen=${gen}, now=${s.generation})`)
+      return
+    }
     const text = (result.text || '').trim()
     s.latestText = text
     s.latestConf = result.confidence
@@ -119,11 +114,14 @@ export function pushFrame(userId, f32Frame) {
   s.lastFrameAt = Date.now()
   // If utterance is getting too long, force a transcribe even without silence
   if (s.totalSamples >= MAX_UTTERANCE_SECONDS * SAMPLE_RATE) {
-    if (s.endTimer) { clearTimeout(s.endTimer); s.endTimer = null }
     endUtterance(userId)
     return
   }
-  scheduleUtteranceEnd(userId)
+  // Fire immediately on every frame — no silence debounce. The VAD already
+  // gates by RMS, so we only get actual speech frames. Firing eagerly means
+  // whisper runs on partial utterances and the gate gets words as fast as
+  // possible. Silence-padding handles the abrupt cut.
+  endUtterance(userId)
 }
 
 export function getLatest(userId) {
@@ -139,7 +137,20 @@ export function clear(userId) {
   s.totalSamples = 0
   s.latestText = ''
   s.latestConf = 0
-  if (s.endTimer) { clearTimeout(s.endTimer); s.endTimer = null }
+  s.generation++  // invalidate any in-flight transcription
+  s.inFlight = false
+}
+
+// Clear ALL sessions — called on barge-in to flush stale whisper output.
+export function clearAll() {
+  for (const s of sessions.values()) {
+    s.chunks = []
+    s.totalSamples = 0
+    s.latestText = ''
+    s.latestConf = 0
+    s.generation++
+    s.inFlight = false
+  }
 }
 
 export function onPartial(userId, fn) {

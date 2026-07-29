@@ -1,5 +1,5 @@
 import { pushAudioFrame, flushAudio } from 'dispipe/voice'
-import { pushFrame, onPartial, onStable } from './whisper-stream.js'
+import { pushFrame, onPartial, onStable, clearAll as clearAllWhisper } from './whisper-stream.js'
 import * as speakGate from './speak-gate.js'
 
 const SAMPLE_RATE = 48000
@@ -7,12 +7,12 @@ const ACTIVE_RMS = Number(process.env.VAD_ACTIVE_RMS || 0.003)
 // Barge-in: raw mic energy this loud DURING bot speech = the listener talking over
 // the bot (with headphones there is no loopback, so it can only be them). Well above
 // residual room noise so the bot does not cut itself. Tunable.
-const BARGE_IN_RMS = Number(process.env.VAD_BARGE_IN_RMS || 0.05)
+const BARGE_IN_RMS = Number(process.env.VAD_BARGE_IN_RMS || 0.08)
 // Barge-in needs SUSTAINED speech, not one transient frame -- a click/echo tail/brief
 // noise should never cut the bot. Require this many ms of continuous loud audio, and
 // ignore the first GRACE ms of the bot's reply (its own onset / room settling).
-const BARGE_SUSTAIN_MS = Number(process.env.VAD_BARGE_SUSTAIN_MS || 200)
-const BARGE_GRACE_MS = Number(process.env.VAD_BARGE_GRACE_MS || 500)
+const BARGE_SUSTAIN_MS = Number(process.env.VAD_BARGE_SUSTAIN_MS || 500)
+const BARGE_GRACE_MS = Number(process.env.VAD_BARGE_GRACE_MS || 300)
 let _bargeRunMs = 0
 let _botSpeakStartAt = 0
 const TARGET_RMS = 0.15
@@ -24,7 +24,7 @@ const GAIN_MIN_RMS = 0.003
 // acoustic loopback (the bot's voice returning through a user's speakers->mic
 // with round-trip latency). The real cure is headphones on the user side; this
 // covers the common open-speaker case. Env-tunable.
-const BOT_SPEAK_TAIL_MS = Number(process.env.BOT_SPEAK_TAIL_MS || 1500)
+const BOT_SPEAK_TAIL_MS = Number(process.env.BOT_SPEAK_TAIL_MS || 800)
 
 const userBuffers = new Map()
 let _processingQueue = null
@@ -116,9 +116,6 @@ function getOrCreateBuffer(userId) {
       const username = _usernameResolver(userId)
       speakGate.noteWhisperWord({ userId, username, text, confidence: conf })
     }
-    // whisper-stream fires once per utterance at end-of-speech (via onStable); the
-    // onPartial listener fired the SAME final text a second time, which the gate had
-    // to debounce away. Register only the stable fire -> one clean trigger.
     onStable(userId, fire)
   }
   return userBuffers.get(userId)
@@ -155,6 +152,7 @@ export function onPcmChunk(userId, stereoF32) {
         _bargeRunMs = 0
         _botSpeakingUntil = 0
         try { flushAudio() } catch {}
+        try { clearAllWhisper() } catch {}
         try { speakGate.bargeIn() } catch (e) { console.error('[vad] bargeIn err:', e.message) }
         console.log(`[vad] BARGE-IN sustained (rms=${rawRms.toFixed(3)})`)
       }

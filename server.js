@@ -156,11 +156,6 @@ app.post('/api/generate', async (req, res) => {
     res.status(500).json({ error: err.message })
   }
 })
-async function ensureModels() {
-  const { downloadModels } = await import('./download-models.js')
-  await downloadModels()
-}
-
 app.post('/api/chat', async (req, res) => {
   try {
     const { prompt, system } = req.body
@@ -369,7 +364,6 @@ app.get('/debug/guild/:guildId/channel/:channelId', async (req, res) => {
 async function start() {
   const discordOnly = (process.env.DISCORD_TOKEN || process.env.DISCORD_BOT_TOKEN) && process.env.DEMO !== '1'
   if (!discordOnly) {
-    await ensureModels()
     loadLipsync()
   }
   await loadVoiceEmbedding()

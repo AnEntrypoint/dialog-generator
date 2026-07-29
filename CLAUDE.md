@@ -126,7 +126,7 @@ const MODEL_IDS = {
 
 ## Testing
 
-Run `npm test` (vitest). 120 tests across 7 files. Pure functions are extracted into shared modules (`server-utils.mjs`, `animation-core.mjs`, `tokenizer.mjs`) that both source files and tests import.
+Manual debugging only — no automated test suite.
 
 ## Quantize Workflow
 
@@ -542,23 +542,6 @@ voiceReceiver.speaking.on('start', (userId) => {
 ### Reference Implementation
 
 **webrig companion** (C:/dev/webrig/companion/index.js) uses identical dispipe pattern for Discord voice. Reference for dispipe API usage, stereo downmix logic, and VAD tuning.
-
-## Testing — Discord Voice Pipeline
-
-**Test File**: `test/discord-voice-pipeline.test.mjs` (67 lines, 4 tests)
-
-Vitest suite verifying voice processing pipeline components:
-
-1. **whisper-stt**: Validates Whisper STT pipeline accepts 48kHz PCM buffer from Discord
-2. **tts-synthesis**: Validates TTS pipeline accepts text input and outputs float32 audio
-3. **resampling-24k-to-48k**: Validates linear interpolation upsampling (24kHz → 48kHz)
-4. **full-pipeline**: End-to-end integration test ensuring all pipeline stages connect without crashing
-
-**Mock Audio**: 1-second 48kHz Int16Array buffer (48000 samples, 96KB). Uses sine wave pattern for realistic audio data.
-
-**Real Imports**: Tests import actual `resampleAudio` from `server-utils.mjs` for witnessed resampling verification (not mocked).
-
-**Run**: `npm test -- test/discord-voice-pipeline.test.mjs`
 
 ## Discord Context — Per-Channel Message History
 
